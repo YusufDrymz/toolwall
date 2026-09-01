@@ -4,9 +4,9 @@ package main
 import (
 	"fmt"
 	"os"
-)
 
-const version = "0.1.0"
+	"github.com/YusufDrymz/toolwall/internal/mcp"
+)
 
 const usage = `toolwall - keep an agent from sending out what it just read
 
@@ -43,7 +43,7 @@ func main() {
 	case "audit":
 		code, err = runAudit(os.Args[2:])
 	case "version", "--version", "-v":
-		fmt.Println("toolwall", version)
+		fmt.Println("toolwall", mcp.Version)
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 	default:
