@@ -11,7 +11,7 @@ import (
 const usage = `toolwall - keep an agent from sending out what it just read
 
 usage:
-  toolwall init   --server NAME [--config FILE] -- COMMAND [ARGS...]
+  toolwall init   --server NAME [--config FILE] (-- COMMAND [ARGS...] | --url URL)
   toolwall verify [--config FILE] [--server NAME]
   toolwall run    --server NAME [--config FILE] [-- COMMAND [ARGS...]]
   toolwall serve  [--config FILE]
