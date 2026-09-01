@@ -1,0 +1,30 @@
+# A worked policy for the demo server. Generate your own with:
+#   toolwall init --server demo -- go run ./examples/demo-server
+version: 1
+mode: enforce
+
+servers:
+    demo:
+        command: go
+        args: [run, ./examples/demo-server]
+
+tools:
+    demo.read_notes:
+        labels: [sensitive]
+
+    # Both labels on purpose: the page is written by someone else, and the URL
+    # is an exit -- anything the model knows fits in a query string.
+    demo.fetch_url:
+        labels: [untrusted, sink]
+        args:
+            url:
+                allow: ['^https://(docs|wiki)\.example\.com/']
+
+    demo.send_email:
+        labels: [sink]
+        args:
+            to:
+                allow: ['@example\.com$']
+
+audit:
+    file: toolwall-audit.jsonl
