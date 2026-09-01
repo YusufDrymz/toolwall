@@ -45,6 +45,11 @@ func (d Decision) Blocked() bool { return d.Deny && d.Enforced }
 type Engine struct {
 	cfg *policy.Config
 
+	// offline drops the pin-liveness gate: there is no server to compare a
+	// definition against, so a pinned tool is judged on its flow rules alone.
+	// Set only by explain, which simulates a policy without connecting.
+	offline bool
+
 	mu     sync.Mutex
 	scopes map[string]*scope
 	pins   map[string]pinState // key: qualified name, servers may collide on tool names
@@ -69,6 +74,14 @@ func New(cfg *policy.Config) *Engine {
 		scopes: map[string]*scope{},
 		pins:   map[string]pinState{},
 	}
+}
+
+// Offline marks the engine as simulating: Decide will not refuse a pinned tool
+// for want of a live definition, because there is no server in the loop. Use
+// it for explain, never for enforcement.
+func (e *Engine) Offline() *Engine {
+	e.offline = true
+	return e
 }
 
 // qualify is the pin-map key: it keeps two servers' same-named tools apart.
@@ -133,7 +146,7 @@ func (e *Engine) Decide(scopeID, server, tool string, arguments json.RawMessage)
 			Reason: "tool is blocked by policy"}
 	}
 
-	if tp.Digest != "" && e.cfg.Flow.PinMismatch == policy.ActionDeny {
+	if !e.offline && tp.Digest != "" && e.cfg.Flow.PinMismatch == policy.ActionDeny {
 		e.mu.Lock()
 		st, checked := e.pins[qualify(server, tool)]
 		e.mu.Unlock()
