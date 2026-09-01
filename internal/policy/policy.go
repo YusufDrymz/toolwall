@@ -179,6 +179,12 @@ func (c *Config) normalize() error {
 		}
 	}
 
+	for name, spec := range c.Servers {
+		if err := spec.Validate(); err != nil {
+			return fmt.Errorf("policy: server %q: %w", name, err)
+		}
+	}
+
 	if err := c.compileArgs(); err != nil {
 		return err
 	}
