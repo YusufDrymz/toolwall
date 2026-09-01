@@ -159,6 +159,36 @@ geldiğinde gateway sunucudan tanımları kendisi ister ve cevabı bekler. Doğr
 tamamlanamazsa çağrı geçirilmez, reddedilir: sadece zamanlama uygun olduğunda çalışan bir
 pin, pin değildir.
 
+## Birden çok sunucu, tek scope
+
+`run` tek bir sunucunun önüne oturur. `serve` ise policy'deki tüm sunucuların önüne aynı
+anda, tek bir paylaşılan akış scope'u ile oturur ve asıl mesele bu paylaşılan scope:
+
+```sh
+toolwall serve
+```
+
+Tool'lar policy'nin zaten kullandığı sunucu id'siyle öneklenir (`hr.read_record`,
+`mail.send`). toolwall'ı client konfigürasyonuna bir kez koyarsın, hepsini toplar:
+
+```json
+{
+  "mcpServers": {
+    "toolwall": {
+      "command": "toolwall",
+      "args": ["serve", "--config", "/path/to/toolwall.yaml"]
+    }
+  }
+}
+```
+
+Artık akış kuralları sunucular arasına uzanır. `hr` sunucusundan bir kayıt okuyup `mail`
+sunucusundan dışarı göndermek, tek oturumda önce `sensitive` sonra `sink`'e dokunmaktır,
+yani reddedilir. Sunucu-başına izolasyon ve kimlik gateway'lerinin göremediği geçiş tam
+olarak budur, çünkü her birinin ayrı ayrı koruduğu iki sunucunun arasında olur.
+
+Policy'yi sunucu sunucu `init --server` ile doldur; `verify` hepsini birden kontrol eder.
+
 ## Kurallar
 
 Varsayılan policy iki kuraldan ibaret ve aracın var olma sebebi de bu iki kural:
@@ -217,10 +247,13 @@ Bu bölüm özellik listesinden daha önemli.
 - **Tek bir çağrı da sızdırma olabilir.** Bir tool hem özel veri okuyup hem ağa
   erişiyorsa hiçbir sıralama kuralı işe yaramaz. Böylelerini baştan `sink` etiketle ve
   argümanlarını kısıtla.
-- **Scope, gateway sürecidir.** 2026-07-28 revizyonu bir bağlantının oturum olmadığını
-  açıkça söylüyor ve protokol bir proxy'ye konuşma kimliği vermiyor. Client'ın `_meta`
-  içinde bir korelasyon id'si set ediyorsa `--scope-key` ile onu göster, akış konuşma
-  başına izlensin.
+- **Scope, gateway sürecidir.** `run` ve `serve` için de bir toolwall süreci bir akış
+  scope'udur; `serve` bunu önündeki tüm sunucular arasında paylaşır, ki özellik de bu.
+  2026-07-28 revizyonu bir bağlantının oturum olmadığını açıkça söylüyor ve bir proxy'ye
+  konuşma kimliği vermiyor; client'ın `_meta` içinde bir korelasyon id'si set ediyorsa
+  `--scope-key` ile onu göster, akış konuşma başına izlensin.
+- **`serve` tool ve prompt'ları proxy'ler.** Resource'lar henüz toplanmıyor; onlara
+  ihtiyacı olan bir client o sunucuya doğrudan bağlanmalı.
 - **Şimdilik sadece stdio.** Uzak sunucular Streamable HTTP'de ve sıradaki iş o.
 - **Model hâlâ konuşabilir.** `toolwall` tool çağrılarını korur, modelin kullanıcıya
   verdiği cevapları okumaz.

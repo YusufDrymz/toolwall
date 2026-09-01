@@ -159,6 +159,37 @@ been checked yet makes the gateway ask the server for its definitions and wait f
 the answer. If that check cannot be completed, the call is refused rather than
 allowed: a pin that is only enforced when the timing suits it is not a pin.
 
+## Multiple servers, one scope
+
+`run` fronts a single server. `serve` fronts every server in the policy at once,
+behind one shared flow scope -- and the shared scope is the point:
+
+```sh
+toolwall serve
+```
+
+Tools are namespaced with the server id the policy already uses (`hr.read_record`,
+`mail.send`). Put toolwall in your client config once and it aggregates all of them:
+
+```json
+{
+  "mcpServers": {
+    "toolwall": {
+      "command": "toolwall",
+      "args": ["serve", "--config", "/path/to/toolwall.yaml"]
+    }
+  }
+}
+```
+
+Now the flow rules reach across servers. Reading a record on the `hr` server and
+sending it out through the `mail` server is one session touching `sensitive` and then
+`sink`, so it is refused -- exactly the crossing that per-server isolation and identity
+gateways cannot see, because it happens between two servers they each guard in isolation.
+
+Populate the policy one server at a time with `init --server`, and `verify` checks all
+of them.
+
 ## The rules
 
 The default policy is two rules, and they are the reason the tool exists:
@@ -216,10 +247,13 @@ Being clear about this matters more than the feature list.
 - **One call can still be an exfiltration.** If a tool both reads private data and
   reaches the network, no ordering rule helps. Label those `sink` from the start and
   constrain their arguments.
-- **The scope is the gateway process.** The 2026-07-28 revision is explicit that a
-  connection is not a session, and the protocol gives a proxy no conversation
-  identifier. If your client sets a correlation id in `_meta`, point `--scope-key` at
-  it and flows will be tracked per conversation instead.
+- **The scope is the gateway process.** Under `run` and `serve` alike, one toolwall
+  process is one flow scope; `serve` shares it across every server it fronts, which is
+  the feature. The 2026-07-28 revision is explicit that a connection is not a session
+  and gives a proxy no conversation identifier, so if your client sets a correlation id
+  in `_meta`, point `--scope-key` at it to track flows per conversation instead.
+- **`serve` proxies tools and prompts.** Resources are not aggregated yet; a client
+  that needs them should reach that server directly.
 - **stdio only, for now.** Streamable HTTP is where the remote servers are, and it is
   the obvious next thing.
 - **The model can still talk.** `toolwall` guards tool calls. It does not read the
