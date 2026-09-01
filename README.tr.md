@@ -182,6 +182,35 @@ Tool'lar policy'nin zaten kullandığı sunucu id'siyle öneklenir (`hr.read_rec
 }
 ```
 
+### HTTP üzerinden uzak sunucular
+
+Bir sunucu yerel bir komut ya da uzak bir Streamable HTTP endpoint'i olabilir; `serve`
+ikisinin karışımını aynı scope'un arkasında toplar. `init`'i komut yerine bir URL'e
+doğrult:
+
+```sh
+toolwall init --server hr --url https://hr.internal/mcp --header "Authorization: Bearer ${HR_TOKEN}"
+```
+
+```yaml
+servers:
+    hr:
+        url: https://hr.internal/mcp
+        headers:
+            Authorization: Bearer ${HR_TOKEN}
+    mail:
+        command: mail-mcp
+```
+
+Header değerleri bağlanma anında `${ENV}` genişletir, yani commit'lenmiş bir policy asla
+bir kimlik bilgisi tutmaz. toolwall 2026-07-28 transport'unu konuşur (zorunlu
+`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` header'ları, SSE yanıtları ve bir
+sunucunun talep edebileceği `Mcp-Param-*` mirroring'i) ve upstream hâlâ eski oturum tabanlı
+Streamable HTTP biçimini konuşuyorsa ona düşer. Loopback dışına düz `http://`, `insecure:
+true` ile bilinçli izin vermedikçe reddedilir; çünkü bir bearer token açıkta telde durmaz.
+Uzak `hr` sunucusundan bir kayıt okuyup yerel `mail` sunucusundan dışarı göndermek yine tek
+scope, yine reddediliyor.
+
 Artık akış kuralları sunucular arasına uzanır. `hr` sunucusundan bir kayıt okuyup `mail`
 sunucusundan dışarı göndermek, tek oturumda önce `sensitive` sonra `sink`'e dokunmaktır,
 yani reddedilir. Sunucu-başına izolasyon ve kimlik gateway'lerinin göremediği geçiş tam
@@ -254,13 +283,15 @@ Bu bölüm özellik listesinden daha önemli.
   `--scope-key` ile onu göster, akış konuşma başına izlensin.
 - **`serve` tool ve prompt'ları proxy'ler.** Resource'lar henüz toplanmıyor; onlara
   ihtiyacı olan bir client o sunucuya doğrudan bağlanmalı.
-- **Şimdilik sadece stdio.** Uzak sunucular Streamable HTTP'de ve sıradaki iş o.
+- **`run` sadece stdio.** O, spawn edilen bir child üzerinden byte proxy'si. Uzak
+  Streamable HTTP sunucuları `serve` üzerinden gider; `serve` onlarla gerçek bir MCP
+  client gibi konuşur.
 - **Model hâlâ konuşabilir.** `toolwall` tool çağrılarını korur, modelin kullanıcıya
   verdiği cevapları okumaz.
 
 ## Protokol desteği
 
-Konfigürasyon gerekmeden iki era da destekleniyor. 2026-07-28 revizyonu `initialize`
+Konfigürasyon gerekmeden iki transport ve iki era da destekleniyor. Yerel sunucular stdio, uzak sunucular Streamable HTTP üzerinde. 2026-07-28 revizyonu `initialize`
 handshake'ini kaldırdı ve her isteği kendi kendine yeter hale getirdi; 2025-11-25 ve
 öncesi ise oturum istiyor. `init` ve `verify`, spec'in stdio geri uyumluluk kurallarında
 tarif edildiği gibi önce `server/discover` ile yokluyor, olmazsa `initialize`'a düşüyor.

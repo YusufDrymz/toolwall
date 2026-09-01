@@ -182,6 +182,34 @@ Tools are namespaced with the server id the policy already uses (`hr.read_record
 }
 ```
 
+### Remote servers over HTTP
+
+A server can be a local command or a remote Streamable HTTP endpoint; `serve` fronts a
+mix of the two behind the same scope. Point `init` at a URL instead of a command:
+
+```sh
+toolwall init --server hr --url https://hr.internal/mcp --header "Authorization: Bearer ${HR_TOKEN}"
+```
+
+```yaml
+servers:
+    hr:
+        url: https://hr.internal/mcp
+        headers:
+            Authorization: Bearer ${HR_TOKEN}
+    mail:
+        command: mail-mcp
+```
+
+Header values expand `${ENV}` at connect time, so a committed policy never holds a
+credential. toolwall speaks the 2026-07-28 transport -- the required `MCP-Protocol-Version`,
+`Mcp-Method` and `Mcp-Name` headers, SSE responses, and the `Mcp-Param-*` mirroring a
+server can demand -- and falls back to the older session-based Streamable HTTP shape when
+an upstream still speaks it. Plain `http://` to anything but loopback is refused unless you
+opt in with `insecure: true`, because a bearer token does not belong on the wire in clear.
+Reading a record from the remote `hr` server and sending it out through the local `mail`
+server is still one scope, still refused.
+
 Now the flow rules reach across servers. Reading a record on the `hr` server and
 sending it out through the `mail` server is one session touching `sensitive` and then
 `sink`, so it is refused -- exactly the crossing that per-server isolation and identity
@@ -254,14 +282,14 @@ Being clear about this matters more than the feature list.
   in `_meta`, point `--scope-key` at it to track flows per conversation instead.
 - **`serve` proxies tools and prompts.** Resources are not aggregated yet; a client
   that needs them should reach that server directly.
-- **stdio only, for now.** Streamable HTTP is where the remote servers are, and it is
-  the obvious next thing.
+- **`run` is stdio only.** It is a byte proxy over a spawned child. Remote Streamable
+  HTTP servers go through `serve`, which talks to them as a real MCP client.
 - **The model can still talk.** `toolwall` guards tool calls. It does not read the
   model's replies to the user.
 
 ## Protocol support
 
-Both eras, without configuration. The 2026-07-28 revision dropped the `initialize`
+Both transports and both eras, without configuration. Local servers run on stdio; remote servers run over Streamable HTTP. The 2026-07-28 revision dropped the `initialize`
 handshake and made every request self-contained; everything up to 2025-11-25 needs a
 session. `init` and `verify` probe with `server/discover` and fall back to `initialize`
 exactly as the spec's stdio compatibility rules describe. The gateway itself rewrites
