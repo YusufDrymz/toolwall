@@ -37,9 +37,14 @@ func runGateway(args []string) (int, error) {
 		cfg.Mode = policy.ModeObserve
 	}
 
-	spec, err := resolveSpec(cfg, *server, fs.Args())
+	spec, err := resolveSpec(cfg, *server, fs.Args(), httpFlags{})
 	if err != nil {
 		return 2, err
+	}
+	if spec.IsHTTP() {
+		// run is a byte proxy over a spawned child; it cannot front a remote
+		// endpoint. serve speaks to HTTP upstreams as a real MCP client.
+		return 2, fmt.Errorf("run fronts a stdio server; %q is an http server, use toolwall serve", *server)
 	}
 
 	logPath := cfg.Audit.File
