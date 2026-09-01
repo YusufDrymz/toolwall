@@ -86,7 +86,9 @@ mode: observe
 servers:
     demo:
         command: go
-        args: [run, ./examples/demo-server]
+        args:
+            - run
+            - ./examples/demo-server
 tools:
     demo.read_notes:
         labels: [sensitive]
@@ -141,9 +143,16 @@ $ toolwall verify
 ```
 
 That is the rug pull: a server that ships a harmless tool, waits for approval, then
-edits the description to carry instructions. `verify` exits 1, and at runtime the
-gateway drops the mutated tool from `tools/list` so the poisoned text never reaches
-the model at all.
+edits the description to carry instructions. `verify` exits 1 in CI. At runtime the
+gateway drops the mutated tool from `tools/list`, so the poisoned text never reaches
+the model, and refuses calls to it.
+
+The refusal does not depend on the client listing tools first. A client that cached
+the list from an earlier session never sends `tools/list`, and two requests sent
+together do not arrive in a helpful order, so a call to a pinned tool that has not
+been checked yet makes the gateway ask the server for its definitions and wait for
+the answer. If that check cannot be completed, the call is refused rather than
+allowed: a pin that is only enforced when the timing suits it is not a pin.
 
 ## The rules
 
