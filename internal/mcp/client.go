@@ -5,16 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"strconv"
 	"sync"
 	"time"
 )
 
 // ProtocolVersion is the revision toolwall speaks when it talks to a server on
-// its own behalf (init, verify). In proxy mode nothing is rewritten: whatever
-// the client sends is what the server sees.
+// its own behalf (init, verify, serve). In proxy mode nothing is rewritten:
+// whatever the client sends is what the server sees.
 const ProtocolVersion = "2026-07-28"
 
 // Era is which dialect a server speaks. The 2026-07-28 revision dropped the
@@ -37,27 +35,49 @@ const (
 	defaultHandshakeTimeout = 10 * time.Second
 )
 
-// ServerSpec is how to start a stdio MCP server.
+// ServerSpec is how to reach an MCP server: a command to spawn on stdio, or a
+// URL to POST to over Streamable HTTP. Exactly one of Command and URL is set.
 type ServerSpec struct {
-	Command string            `yaml:"command" json:"command"`
+	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
 	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
 	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	Dir     string            `yaml:"dir,omitempty" json:"dir,omitempty"`
+
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
+	// Headers are sent on every request; values may reference the environment
+	// as ${NAME} so a committed policy never has to hold a credential.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// Insecure permits plain http:// to a host other than loopback. Off by
+	// default: a bearer token on the wire in clear is the kind of mistake a
+	// security tool should refuse to make quietly.
+	Insecure bool `yaml:"insecure,omitempty" json:"insecure,omitempty"`
 }
 
-// Client is a synchronous MCP client over a spawned stdio server, used for
-// inventory work: list what a server exposes so it can be labelled and pinned.
+func (s ServerSpec) IsHTTP() bool { return s.URL != "" }
+
+// Validate rejects a spec that is neither or both transports.
+func (s ServerSpec) Validate() error {
+	switch {
+	case s.Command == "" && s.URL == "":
+		return errors.New("server needs a command or a url")
+	case s.Command != "" && s.URL != "":
+		return errors.New("server has both a command and a url; pick one")
+	case s.URL == "" && (len(s.Headers) > 0 || s.Insecure):
+		return errors.New("headers and insecure only apply to a url server")
+	}
+	return nil
+}
+
+// Client is a synchronous MCP client used for inventory work and for the
+// gateway's upstream calls. One call at a time.
 type Client struct {
-	cmd    *exec.Cmd
-	conn   *Conn
-	stderr *tailBuffer
+	t    transport
+	http bool
 
-	incoming chan *Message
-	readErr  error
-	readOnce sync.Once
-
-	mu     sync.Mutex
-	nextID int64
+	mu      sync.Mutex
+	nextID  int64
+	schemas map[string]json.RawMessage // tool name -> inputSchema, for header mirroring
+	warns   []string
 
 	Era             Era
 	ProtocolVersion string
@@ -66,82 +86,53 @@ type Client struct {
 	Instructions    string
 }
 
-// Dial starts the server and works out which protocol era it speaks.
-//
-// The child inherits the parent environment: MCP servers routinely need PATH,
-// HOME and their own credentials, and an inventory taken against a crippled
-// server would not describe the server the client actually talks to.
+// Dial connects to the server and works out which protocol era it speaks.
 func Dial(ctx context.Context, spec ServerSpec) (*Client, error) {
-	if spec.Command == "" {
-		return nil, errors.New("mcp: empty command")
-	}
-	cmd := exec.Command(spec.Command, spec.Args...)
-	cmd.Dir = spec.Dir
-	cmd.Env = os.Environ()
-	for k, v := range spec.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
+	if err := spec.Validate(); err != nil {
+		return nil, fmt.Errorf("mcp: %w", err)
 	}
 
-	stdin, err := cmd.StdinPipe()
+	c := &Client{schemas: map[string]json.RawMessage{}}
+	var err error
+	if spec.IsHTTP() {
+		c.http = true
+		c.t, err = startHTTP(spec, c.schemaFor)
+	} else {
+		c.t, err = startStdio(spec)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("mcp: stdin pipe: %w", err)
+		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("mcp: stdout pipe: %w", err)
-	}
-	stderrBuf := &tailBuffer{limit: 4 << 10}
-	cmd.Stderr = stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("mcp: start %q: %w", spec.Command, err)
-	}
-
-	c := &Client{
-		cmd:      cmd,
-		conn:     NewConn(stdout, stdin),
-		stderr:   stderrBuf,
-		incoming: make(chan *Message, 8),
-	}
-	go c.readLoop()
 
 	// Cancelling the context has to unblock whatever we are waiting on, and
-	// killing the child is the only thing that reliably does that.
-	stop := context.AfterFunc(ctx, func() { _ = c.kill() })
+	// tearing the transport down is the only thing that reliably does that.
+	stop := context.AfterFunc(ctx, func() { _ = c.t.close() })
 	defer stop()
 
 	if err := c.detectEra(); err != nil {
-		_ = c.kill()
+		_ = c.t.close()
 		return nil, err
 	}
 	return c, nil
 }
 
-func (c *Client) readLoop() {
-	defer close(c.incoming)
-	for {
-		msg, err := c.conn.Read()
-		if err != nil {
-			c.readOnce.Do(func() { c.readErr = err })
-			return
-		}
-		c.incoming <- msg
-	}
-}
-
-// detectEra follows the stdio backward-compatibility probe from the spec: send
-// server/discover, and treat a result or a recognized modern error as proof of
-// a modern server. Anything else -- method not found, a silent server, a crash
-// -- means legacy, and we retry with the old handshake.
+// detectEra follows the spec's backward-compatibility probe: send
+// server/discover and treat a result or a recognized modern error as proof of
+// a modern server. Anything else means legacy, and we retry with the old
+// handshake -- except an HTTP failure that is clearly not an era question
+// (auth, a dead server), which is reported as is instead of being buried
+// under a second, equally doomed attempt.
 func (c *Client) detectEra() error {
 	c.Era = EraModern
 	c.ProtocolVersion = ProtocolVersion
+	c.syncVersion()
 
 	var res DiscoverResult
 	err := c.call(defaultProbeTimeout, MethodDiscover, nil, &res)
 	switch {
 	case err == nil:
 		c.ProtocolVersion = pickVersion(res.SupportedVersions)
+		c.syncVersion()
 		c.Capabilities = res.Capabilities
 		c.Instructions = res.Instructions
 		c.ServerInfo = res.ServerInfo()
@@ -160,7 +151,16 @@ func (c *Client) detectEra() error {
 			return fmt.Errorf("mcp: server rejected protocol %s and offered no alternative", ProtocolVersion)
 		}
 		c.ProtocolVersion = pickVersion(data.Supported)
+		c.syncVersion()
 		return nil
+
+	case c.http && isModernHTTPSignal(err):
+		// HeaderMismatch, a missing capability, or 404 + method-not-found: the
+		// server is modern and simply did not like or offer server/discover.
+		return nil
+
+	case c.http && !isLegacyHTTPSignal(err):
+		return c.annotate(fmt.Errorf("mcp: %w", err))
 
 	default:
 		return c.legacyInitialize()
@@ -170,6 +170,7 @@ func (c *Client) detectEra() error {
 func (c *Client) legacyInitialize() error {
 	c.Era = EraLegacy
 	c.ProtocolVersion = "2025-06-18"
+	c.syncVersion()
 
 	var res InitializeResult
 	params := InitializeParams{
@@ -182,16 +183,24 @@ func (c *Client) legacyInitialize() error {
 	}
 	if res.ProtocolVersion != "" {
 		c.ProtocolVersion = res.ProtocolVersion
+		c.syncVersion()
 	}
 	c.ServerInfo = res.ServerInfo
 	c.Capabilities = res.Capabilities
 	c.Instructions = res.Instructions
 
+	if s, ok := c.t.(sessioned); ok {
+		s.legacyMode()
+	}
+
 	raw, err := c.encodeParams(nil)
 	if err != nil {
 		return err
 	}
-	return c.conn.Write(&Message{JSONRPC: "2.0", Method: "notifications/initialized", Params: raw})
+	ctx, cancel := context.WithTimeout(context.Background(), defaultHandshakeTimeout)
+	defer cancel()
+	_, err = c.t.roundTrip(ctx, &Message{JSONRPC: "2.0", Method: "notifications/initialized", Params: raw})
+	return err
 }
 
 // CallRaw sends one request with raw params and hands back the raw result.
@@ -200,18 +209,41 @@ func (c *Client) legacyInitialize() error {
 // and the per-request protocol metadata is refilled by the client, so toolwall
 // speaks to the upstream as itself rather than replaying the caller's _meta.
 func (c *Client) CallRaw(method string, params json.RawMessage) (json.RawMessage, error) {
-	var out json.RawMessage
 	var p any
 	if len(params) > 0 {
 		p = params
 	}
-	if err := c.call(defaultCallTimeout, method, p, &out); err != nil {
+
+	if c.http && method == MethodToolsCall {
+		// Streamable HTTP clients must mirror x-mcp-header parameters into
+		// headers, and that needs the tool's schema. Make sure we have it.
+		if name := nameIn(params); name != "" && c.schemaFor(name) == nil {
+			if _, err := c.ListTools(); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	var out json.RawMessage
+	err := c.call(defaultCallTimeout, method, p, &out)
+	if c.http && method == MethodToolsCall && rpcCode(err) == CodeHeaderMismatch {
+		// The spec's prescribed recovery: the schema moved under us, so list
+		// again and retry once with the headers the server now expects.
+		if _, lerr := c.ListTools(); lerr == nil {
+			out = nil
+			err = c.call(defaultCallTimeout, method, p, &out)
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// ListTools walks tools/list to the end of its cursor.
+// ListTools walks tools/list to the end of its cursor. Over Streamable HTTP it
+// also drops any tool whose x-mcp-header annotations are invalid, as the
+// transport spec requires of clients, and remembers each schema so calls can
+// mirror the right headers.
 func (c *Client) ListTools() ([]Tool, error) {
 	var all []Tool
 	cursor := ""
@@ -222,10 +254,28 @@ func (c *Client) ListTools() ([]Tool, error) {
 		}
 		all = append(all, res.Tools...)
 		if res.NextCursor == "" || res.NextCursor == cursor {
-			return all, nil
+			break
 		}
 		cursor = res.NextCursor
 	}
+	if !c.http {
+		return all, nil
+	}
+
+	kept := make([]Tool, 0, len(all))
+	schemas := make(map[string]json.RawMessage, len(all))
+	for _, t := range all {
+		if _, err := headerAnnotations(t.InputSchema); err != nil {
+			c.warn(fmt.Sprintf("tool %q dropped: %v", t.Name, err))
+			continue
+		}
+		schemas[t.Name] = t.InputSchema
+		kept = append(kept, t)
+	}
+	c.mu.Lock()
+	c.schemas = schemas
+	c.mu.Unlock()
+	return kept, nil
 }
 
 // ListPrompts returns the server's prompts. Prompt text lands in the model's
@@ -251,6 +301,26 @@ func (c *Client) ListPrompts() ([]Prompt, error) {
 	}
 }
 
+// Warnings are things the client decided on the operator's behalf and wants
+// them to know about, such as a tool dropped for a malformed header annotation.
+func (c *Client) Warnings() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.warns...)
+}
+
+func (c *Client) warn(s string) {
+	c.mu.Lock()
+	c.warns = append(c.warns, s)
+	c.mu.Unlock()
+}
+
+func (c *Client) schemaFor(tool string) json.RawMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.schemas[tool]
+}
+
 func (c *Client) call(timeout time.Duration, method string, params, out any) error {
 	c.mu.Lock()
 	c.nextID++
@@ -261,44 +331,31 @@ func (c *Client) call(timeout time.Duration, method string, params, out any) err
 	if err != nil {
 		return err
 	}
-	if err := c.conn.Write(&Message{JSONRPC: "2.0", ID: id, Method: method, Params: raw}); err != nil {
-		return err
-	}
 
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-	for {
-		select {
-		case msg, ok := <-c.incoming:
-			if !ok {
-				if c.readErr != nil {
-					return fmt.Errorf("mcp: %s: %w", method, c.readErr)
-				}
-				return fmt.Errorf("mcp: %s: server closed the connection", method)
-			}
-			switch {
-			case msg.IsResponse() && string(msg.ID) == string(id):
-				if msg.Error != nil {
-					return msg.Error
-				}
-				if out == nil || len(msg.Result) == 0 {
-					return nil
-				}
-				if err := json.Unmarshal(msg.Result, out); err != nil {
-					return fmt.Errorf("mcp: %s result: %w", method, err)
-				}
-				return nil
-			case msg.IsRequest():
-				// Server-initiated round trips are out of scope for inventory
-				// work; refuse politely so the server stops waiting on us.
-				_ = c.conn.Write(Errorf(msg.ID, CodeMethodNotFound, "toolwall does not handle %s", msg.Method))
-			}
-			// Notifications and stale responses are ignored.
-		case <-deadline.C:
+	msg, err := c.t.roundTrip(ctx, &Message{JSONRPC: "2.0", ID: id, Method: method, Params: raw})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("mcp: %s: timed out after %s", method, timeout)
 		}
+		var rpc *Error
+		if errors.As(err, &rpc) {
+			return err // keep the wrapping; callers use errors.As
+		}
+		return fmt.Errorf("mcp: %s: %w", method, err)
 	}
+	if msg.Error != nil {
+		return msg.Error
+	}
+	if out == nil || len(msg.Result) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(msg.Result, out); err != nil {
+		return fmt.Errorf("mcp: %s result: %w", method, err)
+	}
+	return nil
 }
 
 // encodeParams marshals params and, on a modern server, attaches the
@@ -331,25 +388,22 @@ func (c *Client) encodeParams(params any) (json.RawMessage, error) {
 	return json.Marshal(fields)
 }
 
-// annotate decorates a failure with whatever the server printed on stderr,
-// which is usually the only clue about why it died.
+func (c *Client) syncVersion() {
+	if v, ok := c.t.(versioned); ok {
+		v.setVersion(c.ProtocolVersion)
+	}
+}
+
+// annotate decorates a failure with whatever the transport knows that the
+// wire did not say -- usually the only clue about why a server died.
 func (c *Client) annotate(err error) error {
-	if tail := c.stderr.String(); tail != "" {
-		return fmt.Errorf("%w (server stderr: %s)", err, tail)
+	if d := c.t.diagnostics(); d != "" {
+		return fmt.Errorf("%w (%s)", err, d)
 	}
 	return err
 }
 
-func (c *Client) Close() error { return c.kill() }
-
-func (c *Client) kill() error {
-	if c.cmd.Process == nil {
-		return nil
-	}
-	_ = c.cmd.Process.Kill()
-	_, err := c.cmd.Process.Wait()
-	return err
-}
+func (c *Client) Close() error { return c.t.close() }
 
 var clientInfo = Implementation{Name: "toolwall", Version: Version}
 
@@ -374,6 +428,39 @@ func pickVersion(supported []string) string {
 func isUnsupportedVersion(err error) bool { return rpcCode(err) == CodeUnsupportedProtocolVersion }
 func isMethodNotFound(err error) bool     { return rpcCode(err) == CodeMethodNotFound }
 
+// isModernHTTPSignal is the transport spec's list of 4xx bodies that identify
+// a modern server: the reserved 2026-07-28 error codes, or a 404 carrying
+// method-not-found (a modern server that lacks the method, as opposed to a
+// legacy server that lacks the endpoint).
+func isModernHTTPSignal(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) || he.RPC == nil {
+		return false
+	}
+	switch he.RPC.Code {
+	case CodeHeaderMismatch, CodeMissingRequiredClientCapability, CodeUnsupportedProtocolVersion:
+		return true
+	case CodeMethodNotFound:
+		return he.Status == 404
+	}
+	return false
+}
+
+// isLegacyHTTPSignal is a 400/404/405 whose body is empty or not a recognized
+// modern error: the response a pre-2026 Streamable HTTP server gives to a
+// request it does not understand.
+func isLegacyHTTPSignal(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	switch he.Status {
+	case 400, 404, 405:
+		return !isModernHTTPSignal(err)
+	}
+	return false
+}
+
 func rpcCode(err error) int {
 	var e *Error
 	if errors.As(err, &e) {
@@ -382,25 +469,13 @@ func rpcCode(err error) int {
 	return 0
 }
 
-// tailBuffer keeps only the last limit bytes written to it.
-type tailBuffer struct {
-	mu    sync.Mutex
-	buf   []byte
-	limit int
-}
-
-func (t *tailBuffer) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.buf = append(t.buf, p...)
-	if len(t.buf) > t.limit {
-		t.buf = t.buf[len(t.buf)-t.limit:]
+// nameIn pulls params.name out of raw call params, for the schema lookup.
+func nameIn(params json.RawMessage) string {
+	var p struct {
+		Name string `json:"name"`
 	}
-	return len(p), nil
-}
-
-func (t *tailBuffer) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(trimSpace(t.buf))
+	if err := json.Unmarshal(params, &p); err != nil {
+		return ""
+	}
+	return p.Name
 }
