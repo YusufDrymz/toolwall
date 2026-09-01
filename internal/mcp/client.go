@@ -194,6 +194,23 @@ func (c *Client) legacyInitialize() error {
 	return c.conn.Write(&Message{JSONRPC: "2.0", Method: "notifications/initialized", Params: raw})
 }
 
+// CallRaw sends one request with raw params and hands back the raw result.
+// The aggregating gateway uses it to forward a client's tool call to the right
+// upstream: rpc errors come back as *Error so they can be relayed unchanged,
+// and the per-request protocol metadata is refilled by the client, so toolwall
+// speaks to the upstream as itself rather than replaying the caller's _meta.
+func (c *Client) CallRaw(method string, params json.RawMessage) (json.RawMessage, error) {
+	var out json.RawMessage
+	var p any
+	if len(params) > 0 {
+		p = params
+	}
+	if err := c.call(defaultCallTimeout, method, p, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ListTools walks tools/list to the end of its cursor.
 func (c *Client) ListTools() ([]Tool, error) {
 	var all []Tool
