@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      # The version toolwall reports to servers is a constant in the source.
+      # Tagging without bumping it would ship a binary that lies about itself.
+      - name: tag matches the version in source
+        run: |
+          source_version=$(go run ./cmd/toolwall version | awk '{print $2}')
+          tag_version=${GITHUB_REF_NAME#v}
+          if [ "$source_version" != "$tag_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match source version $source_version"
+            exit 1
+          fi
+
+      - run: go test ./...
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

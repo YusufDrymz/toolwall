@@ -12,3 +12,6 @@ coverage.out
 .DS_Store
 .idea/
 .vscode/
+
+# Release artifacts
+/dist/

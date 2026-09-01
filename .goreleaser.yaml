@@ -1,0 +1,41 @@
+version: 2
+
+project_name: toolwall
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/toolwall
+    binary: toolwall
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - README.tr.md
+      - LICENSE
+      - examples/toolwall.yaml
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - "^readme"
+      - "^ci:"
+
+release:
+  draft: false
