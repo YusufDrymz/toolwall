@@ -15,6 +15,7 @@ usage:
   toolwall verify [--config FILE] [--server NAME]
   toolwall run    --server NAME [--config FILE] [-- COMMAND [ARGS...]]
   toolwall serve  [--config FILE]
+  toolwall explain [--config FILE] SERVER.TOOL[=ARGS_JSON] ...
   toolwall audit  [--file FILE] [--scope NAME]
   toolwall version
 
@@ -22,6 +23,7 @@ usage:
   verify  re-list every server and fail if a reviewed definition changed
   run     front one server; put toolwall in your client config instead of it
   serve   front every server in the policy behind one shared flow scope
+  explain simulate a policy against a call sequence, offline, before deploying
   audit   read the decision trail back as a timeline
 
 exit codes: 0 ok, 1 policy violation or drift, 2 usage or runtime error
@@ -44,6 +46,8 @@ func main() {
 		code, err = runGateway(os.Args[2:])
 	case "serve":
 		code, err = runServe(os.Args[2:])
+	case "explain":
+		code, err = runExplain(os.Args[2:])
 	case "audit":
 		code, err = runAudit(os.Args[2:])
 	case "version", "--version", "-v":
