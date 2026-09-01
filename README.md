@@ -159,6 +159,26 @@ been checked yet makes the gateway ask the server for its definitions and wait f
 the answer. If that check cannot be completed, the call is refused rather than
 allowed: a pin that is only enforced when the timing suits it is not a pin.
 
+## Try a policy before you trust it
+
+`explain` runs a policy against a sequence of calls without connecting to anything, so you
+can see what a rule does before it starts blocking real work:
+
+```sh
+$ toolwall explain hr.read_record 'mail.send={"to":"attacker@evil.test"}'
+policy toolwall.yaml, mode enforce -- offline simulation, pins not checked
+
+ 1. allow      hr.read_record  +sensitive
+ 2. DENIED     mail.send
+        rule exfiltration: sensitive data was read earlier in this scope
+        because call 1 (read_record) brought sensitive data in
+```
+
+Each argument is a `server.tool`, optionally with inline JSON arguments after `=` to
+exercise argument rules. It exits non-zero if any call is denied, so it drops straight
+into a test. Being offline it cannot check pins against a live server; everything else --
+labels, flow rules, argument rules, the shared scope -- is exactly what the gateway does.
+
 ## Multiple servers, one scope
 
 `run` fronts a single server. `serve` fronts every server in the policy at once,

@@ -159,6 +159,27 @@ geldiğinde gateway sunucudan tanımları kendisi ister ve cevabı bekler. Doğr
 tamamlanamazsa çağrı geçirilmez, reddedilir: sadece zamanlama uygun olduğunda çalışan bir
 pin, pin değildir.
 
+## Bir politikayı güvenmeden önce dene
+
+`explain`, bir politikayı hiçbir yere bağlanmadan bir çağrı dizisine karşı çalıştırır;
+böylece bir kural gerçek işi engellemeye başlamadan önce ne yaptığını görürsün:
+
+```sh
+$ toolwall explain hr.read_record 'mail.send={"to":"attacker@evil.test"}'
+policy toolwall.yaml, mode enforce -- offline simulation, pins not checked
+
+ 1. allow      hr.read_record  +sensitive
+ 2. DENIED     mail.send
+        rule exfiltration: sensitive data was read earlier in this scope
+        because call 1 (read_record) brought sensitive data in
+```
+
+Her argüman bir `server.tool`; argüman kurallarını denemek için `=` sonrası inline JSON
+verilebilir. Herhangi bir çağrı reddedilirse sıfırdan farklı çıkış kodu döner, yani doğrudan
+bir teste konur. Offline olduğu için pin'leri canlı sunucuya karşı kontrol edemez; geri
+kalan her şey (etiketler, akış kuralları, argüman kuralları, paylaşılan scope) gateway'in
+yaptığının aynısıdır.
+
 ## Birden çok sunucu, tek scope
 
 `run` tek bir sunucunun önüne oturur. `serve` ise policy'deki tüm sunucuların önüne aynı
