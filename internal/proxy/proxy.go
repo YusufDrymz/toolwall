@@ -36,6 +36,14 @@ const DefaultScope = "process"
 // after the client goes away.
 const shutdownGrace = 5 * time.Second
 
+// pinProbeID is the request id the gateway uses for its own tools/list. It is
+// a string where clients overwhelmingly use integers, and the response is
+// consumed here rather than forwarded, so it cannot collide with a real call.
+const pinProbeID = `"toolwall/pin-check"`
+
+// pinCheckTimeout bounds how long one call waits for that probe.
+const pinCheckTimeout = 10 * time.Second
+
 type Options struct {
 	Server   string
 	Spec     mcp.ServerSpec
@@ -49,9 +57,14 @@ type Proxy struct {
 	opts Options
 	eng  *flow.Engine
 
-	mu    sync.Mutex
-	calls map[string]pending
-	lists map[string]bool
+	mu     sync.Mutex
+	calls  map[string]pending
+	lists  map[string]bool
+	server *mcp.Conn
+
+	probeOnce sync.Once
+	pinsOnce  sync.Once
+	pinsReady chan struct{}
 }
 
 type pending struct {
@@ -64,10 +77,11 @@ func New(opts Options) *Proxy {
 		opts.Notices = io.Discard
 	}
 	return &Proxy{
-		opts:  opts,
-		eng:   flow.New(opts.Config, opts.Server),
-		calls: map[string]pending{},
-		lists: map[string]bool{},
+		opts:      opts,
+		eng:       flow.New(opts.Config, opts.Server),
+		calls:     map[string]pending{},
+		lists:     map[string]bool{},
+		pinsReady: make(chan struct{}),
 	}
 }
 
@@ -100,6 +114,9 @@ func (p *Proxy) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 
 	client := mcp.NewConn(in, out)
 	server := mcp.NewConn(serverOut, serverIn)
+	p.mu.Lock()
+	p.server = server
+	p.mu.Unlock()
 
 	p.opts.Log.Write(audit.Event{Kind: audit.KindSession, Detail: "gateway started, mode " + string(p.opts.Config.Mode)})
 
@@ -161,6 +178,12 @@ func (p *Proxy) pumpFromServer(server, client *mcp.Conn) error {
 		if err != nil {
 			return err
 		}
+		if msg.IsResponse() && string(msg.ID) == pinProbeID {
+			// Our own request: check the definitions and keep the answer.
+			p.screenToolList(msg)
+			p.pinsOnce.Do(func() { close(p.pinsReady) })
+			continue
+		}
 		if msg.IsResponse() {
 			p.observeResponse(msg)
 		}
@@ -178,6 +201,10 @@ func (p *Proxy) screenCall(msg *mcp.Message) (bool, *mcp.Message) {
 		// Malformed for us is malformed for the server too; let it answer.
 		return true, nil
 	}
+	if p.eng.NeedsPinCheck(params.Name) {
+		p.verifyPins(msg.Params)
+	}
+
 	scope := p.scopeOf(msg.Params)
 	d := p.eng.Decide(scope, params.Name, params.Arguments)
 
@@ -206,6 +233,55 @@ func (p *Proxy) screenCall(msg *mcp.Message) (bool, *mcp.Message) {
 	p.opts.Log.Write(ev)
 	p.remember(msg.ID, params.Name, scope)
 	return true, nil
+}
+
+// verifyPins asks the server for its tool list and waits for the answer, so a
+// pinned tool is judged against a definition seen in this session rather than
+// against whatever the client happened to list earlier -- or never listed.
+//
+// The probe reuses the triggering request's _meta verbatim. On a modern server
+// that carries the protocol version and capabilities the client negotiated, so
+// the gateway does not have to guess an era or speak for the client.
+func (p *Proxy) verifyPins(params json.RawMessage) {
+	p.probeOnce.Do(func() {
+		p.mu.Lock()
+		server := p.server
+		p.mu.Unlock()
+		if server == nil {
+			p.pinsOnce.Do(func() { close(p.pinsReady) })
+			return
+		}
+		probe := &mcp.Message{
+			JSONRPC: "2.0",
+			ID:      json.RawMessage(pinProbeID),
+			Method:  mcp.MethodToolsList,
+			Params:  metaOnly(params),
+		}
+		if err := server.Write(probe); err != nil {
+			p.pinsOnce.Do(func() { close(p.pinsReady) })
+		}
+	})
+
+	select {
+	case <-p.pinsReady:
+	case <-time.After(pinCheckTimeout):
+		fmt.Fprintln(p.opts.Notices, "toolwall: tool list check timed out; pinned tools stay refused")
+	}
+}
+
+// metaOnly keeps just the protocol metadata from a request's params.
+func metaOnly(params json.RawMessage) json.RawMessage {
+	var envelope struct {
+		Meta json.RawMessage `json:"_meta"`
+	}
+	if err := json.Unmarshal(params, &envelope); err != nil || len(envelope.Meta) == 0 {
+		return nil
+	}
+	out, err := json.Marshal(map[string]json.RawMessage{"_meta": envelope.Meta})
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 func (p *Proxy) observeResponse(msg *mcp.Message) {

@@ -44,9 +44,17 @@ type Engine struct {
 	cfg    *policy.Config
 	server string
 
-	mu         sync.Mutex
-	scopes     map[string]*scope
-	mismatched map[string]string // tool -> why its pin failed
+	mu     sync.Mutex
+	scopes map[string]*scope
+	pins   map[string]pinState
+}
+
+// pinState is what we know about one pinned tool. The absence of an entry is
+// itself meaningful: a tool that carries a digest but has never been checked
+// against a live definition has not been cleared, and calling it is refused.
+type pinState struct {
+	ok     bool
+	reason string
 }
 
 type scope struct {
@@ -56,10 +64,10 @@ type scope struct {
 
 func New(cfg *policy.Config, server string) *Engine {
 	return &Engine{
-		cfg:        cfg,
-		server:     server,
-		scopes:     map[string]*scope{},
-		mismatched: map[string]string{},
+		cfg:    cfg,
+		server: server,
+		scopes: map[string]*scope{},
+		pins:   map[string]pinState{},
 	}
 }
 
@@ -73,15 +81,33 @@ func (e *Engine) CheckPin(t mcp.Tool) (policy.Action, string) {
 	}
 	got := policy.Fingerprint(t)
 	if got == tp.Digest {
+		e.mu.Lock()
+		e.pins[t.Name] = pinState{ok: true}
+		e.mu.Unlock()
 		return policy.ActionAllow, ""
 	}
 	reason := fmt.Sprintf("definition changed since it was pinned (want %s, got %s)", short(tp.Digest), short(got))
 
 	e.mu.Lock()
-	e.mismatched[t.Name] = reason
+	e.pins[t.Name] = pinState{reason: reason}
 	e.mu.Unlock()
 
 	return e.cfg.Flow.PinMismatch, reason
+}
+
+// NeedsPinCheck reports whether a call has to wait for a live definition
+// before it can be judged. Without this the pin is only enforced when the
+// client happens to list tools first, and a client that cached the list from
+// an earlier session would never be checked at all.
+func (e *Engine) NeedsPinCheck(tool string) bool {
+	tp, ok := e.cfg.Lookup(e.server, tool)
+	if !ok || tp.Digest == "" || e.cfg.Flow.PinMismatch != policy.ActionDeny {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, checked := e.pins[tool]
+	return !checked
 }
 
 // Decide is called before a tool call reaches the server.
@@ -98,11 +124,17 @@ func (e *Engine) Decide(scopeID, tool string, arguments json.RawMessage) Decisio
 			Reason: "tool is blocked by policy"}
 	}
 
-	e.mu.Lock()
-	pinReason, pinFailed := e.mismatched[tool]
-	e.mu.Unlock()
-	if pinFailed && e.cfg.Flow.PinMismatch == policy.ActionDeny {
-		return Decision{Deny: true, Enforced: enforced, Rule: "pin-mismatch", Reason: pinReason}
+	if tp.Digest != "" && e.cfg.Flow.PinMismatch == policy.ActionDeny {
+		e.mu.Lock()
+		st, checked := e.pins[tool]
+		e.mu.Unlock()
+		switch {
+		case !checked:
+			return Decision{Deny: true, Enforced: enforced, Rule: "pin-unverified",
+				Reason: "the tool is pinned but its live definition could not be checked"}
+		case !st.ok:
+			return Decision{Deny: true, Enforced: enforced, Rule: "pin-mismatch", Reason: st.reason}
+		}
 	}
 
 	if err := tp.CheckArgs(arguments); err != nil {
