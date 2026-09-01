@@ -1,5 +1,7 @@
 # toolwall
 
+[Türkçe](README.tr.md) · **English**
+
 Your agent can read your private data. Your agent can read the open internet.
 `toolwall` is what stops it from doing both and then sending the result somewhere.
 
@@ -70,6 +72,9 @@ go install github.com/YusufDrymz/toolwall/cmd/toolwall@latest
 
 Requires Go 1.24+. Builds with `CGO_ENABLED=0`; the only non-test dependency is
 `gopkg.in/yaml.v3`.
+
+Prebuilt binaries are on the [releases](https://github.com/YusufDrymz/toolwall/releases)
+page.
 
 ## Quickstart
 
