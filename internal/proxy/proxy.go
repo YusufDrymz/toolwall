@@ -78,7 +78,7 @@ func New(opts Options) *Proxy {
 	}
 	return &Proxy{
 		opts:      opts,
-		eng:       flow.New(opts.Config, opts.Server),
+		eng:       flow.New(opts.Config),
 		calls:     map[string]pending{},
 		lists:     map[string]bool{},
 		pinsReady: make(chan struct{}),
@@ -201,12 +201,12 @@ func (p *Proxy) screenCall(msg *mcp.Message) (bool, *mcp.Message) {
 		// Malformed for us is malformed for the server too; let it answer.
 		return true, nil
 	}
-	if p.eng.NeedsPinCheck(params.Name) {
+	if p.eng.NeedsPinCheck(p.opts.Server, params.Name) {
 		p.verifyPins(msg.Params)
 	}
 
 	scope := p.scopeOf(msg.Params)
-	d := p.eng.Decide(scope, params.Name, params.Arguments)
+	d := p.eng.Decide(scope, p.opts.Server, params.Name, params.Arguments)
 
 	ev := audit.Event{
 		Kind:  audit.KindCall,
@@ -229,7 +229,7 @@ func (p *Proxy) screenCall(msg *mcp.Message) (bool, *mcp.Message) {
 	}
 
 	// Stain before the call leaves, not when its result returns: see flow.Record.
-	ev.Labels = audit.SortedLabels(p.eng.Record(scope, params.Name))
+	ev.Labels = audit.SortedLabels(p.eng.Record(scope, p.opts.Server, params.Name))
 	p.opts.Log.Write(ev)
 	p.remember(msg.ID, params.Name, scope)
 	return true, nil
@@ -335,7 +335,7 @@ func (p *Proxy) screenToolList(msg *mcp.Message) {
 	kept := make([]mcp.Tool, 0, len(tools))
 	dropped := 0
 	for _, t := range tools {
-		action, reason := p.eng.CheckPin(t)
+		action, reason := p.eng.CheckPin(p.opts.Server, t)
 		if reason != "" {
 			p.opts.Log.Write(audit.Event{Kind: audit.KindPin, Tool: t.Name, Detail: reason})
 			fmt.Fprintf(p.opts.Notices, "toolwall: %s %s: %s\n", action, t.Name, reason)

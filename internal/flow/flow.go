@@ -38,15 +38,16 @@ type Decision struct {
 
 func (d Decision) Blocked() bool { return d.Deny && d.Enforced }
 
-// Engine holds the flow state. One engine fronts one server, but scopes are
-// keyed by string so a future multi-server gateway can share it.
+// Engine holds the flow state. Server is passed on every call rather than
+// stored, so a single engine can back both the single-server proxy and the
+// aggregating gateway -- the shared scope across servers is the whole point of
+// the latter.
 type Engine struct {
-	cfg    *policy.Config
-	server string
+	cfg *policy.Config
 
 	mu     sync.Mutex
 	scopes map[string]*scope
-	pins   map[string]pinState
+	pins   map[string]pinState // key: qualified name, servers may collide on tool names
 }
 
 // pinState is what we know about one pinned tool. The absence of an entry is
@@ -62,34 +63,42 @@ type scope struct {
 	seen  map[string]Evidence
 }
 
-func New(cfg *policy.Config, server string) *Engine {
+func New(cfg *policy.Config) *Engine {
 	return &Engine{
 		cfg:    cfg,
-		server: server,
 		scopes: map[string]*scope{},
 		pins:   map[string]pinState{},
 	}
 }
 
+// qualify is the pin-map key: it keeps two servers' same-named tools apart.
+func qualify(server, tool string) string {
+	if server == "" {
+		return tool
+	}
+	return server + "." + tool
+}
+
 // CheckPin compares a tool definition against the digest it was pinned with.
 // A server is free to add new tools; it is not free to change one that was
 // already reviewed.
-func (e *Engine) CheckPin(t mcp.Tool) (policy.Action, string) {
-	tp, ok := e.cfg.Lookup(e.server, t.Name)
+func (e *Engine) CheckPin(server string, t mcp.Tool) (policy.Action, string) {
+	tp, ok := e.cfg.Lookup(server, t.Name)
 	if !ok || tp.Digest == "" {
 		return policy.ActionAllow, ""
 	}
+	key := qualify(server, t.Name)
 	got := policy.Fingerprint(t)
 	if got == tp.Digest {
 		e.mu.Lock()
-		e.pins[t.Name] = pinState{ok: true}
+		e.pins[key] = pinState{ok: true}
 		e.mu.Unlock()
 		return policy.ActionAllow, ""
 	}
 	reason := fmt.Sprintf("definition changed since it was pinned (want %s, got %s)", short(tp.Digest), short(got))
 
 	e.mu.Lock()
-	e.pins[t.Name] = pinState{reason: reason}
+	e.pins[key] = pinState{reason: reason}
 	e.mu.Unlock()
 
 	return e.cfg.Flow.PinMismatch, reason
@@ -99,22 +108,22 @@ func (e *Engine) CheckPin(t mcp.Tool) (policy.Action, string) {
 // before it can be judged. Without this the pin is only enforced when the
 // client happens to list tools first, and a client that cached the list from
 // an earlier session would never be checked at all.
-func (e *Engine) NeedsPinCheck(tool string) bool {
-	tp, ok := e.cfg.Lookup(e.server, tool)
+func (e *Engine) NeedsPinCheck(server, tool string) bool {
+	tp, ok := e.cfg.Lookup(server, tool)
 	if !ok || tp.Digest == "" || e.cfg.Flow.PinMismatch != policy.ActionDeny {
 		return false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_, checked := e.pins[tool]
+	_, checked := e.pins[qualify(server, tool)]
 	return !checked
 }
 
 // Decide is called before a tool call reaches the server.
-func (e *Engine) Decide(scopeID, tool string, arguments json.RawMessage) Decision {
+func (e *Engine) Decide(scopeID, server, tool string, arguments json.RawMessage) Decision {
 	enforced := e.cfg.Mode == policy.ModeEnforce
 
-	tp, known := e.cfg.Lookup(e.server, tool)
+	tp, known := e.cfg.Lookup(server, tool)
 	if !known && e.cfg.Flow.UnknownTools == policy.ActionDeny {
 		return Decision{Deny: true, Enforced: enforced, Rule: "unknown-tool",
 			Reason: "tool is not described in the policy and unknown_tools is deny"}
@@ -126,7 +135,7 @@ func (e *Engine) Decide(scopeID, tool string, arguments json.RawMessage) Decisio
 
 	if tp.Digest != "" && e.cfg.Flow.PinMismatch == policy.ActionDeny {
 		e.mu.Lock()
-		st, checked := e.pins[tool]
+		st, checked := e.pins[qualify(server, tool)]
 		e.mu.Unlock()
 		switch {
 		case !checked:
@@ -171,8 +180,8 @@ func (e *Engine) Decide(scopeID, tool string, arguments json.RawMessage) Decisio
 // when the other is judged. Staining on release also means a call that fails
 // still counts, which is the conservative reading -- an attacker who controls
 // a page controls its error text too.
-func (e *Engine) Record(scopeID, tool string) []string {
-	tp, ok := e.cfg.Lookup(e.server, tool)
+func (e *Engine) Record(scopeID, server, tool string) []string {
+	tp, ok := e.cfg.Lookup(server, tool)
 	if !ok || len(tp.Labels) == 0 {
 		e.bump(scopeID)
 		return nil
