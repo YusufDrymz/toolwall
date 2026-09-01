@@ -14,12 +14,14 @@ usage:
   toolwall init   --server NAME [--config FILE] -- COMMAND [ARGS...]
   toolwall verify [--config FILE] [--server NAME]
   toolwall run    --server NAME [--config FILE] [-- COMMAND [ARGS...]]
+  toolwall serve  [--config FILE]
   toolwall audit  [--file FILE] [--scope NAME]
   toolwall version
 
   init    connect to a server, list what it exposes, write a draft policy
   verify  re-list every server and fail if a reviewed definition changed
-  run     the gateway: put toolwall in your MCP client config instead of the server
+  run     front one server; put toolwall in your client config instead of it
+  serve   front every server in the policy behind one shared flow scope
   audit   read the decision trail back as a timeline
 
 exit codes: 0 ok, 1 policy violation or drift, 2 usage or runtime error
@@ -40,6 +42,8 @@ func main() {
 		code, err = runVerify(os.Args[2:])
 	case "run":
 		code, err = runGateway(os.Args[2:])
+	case "serve":
+		code, err = runServe(os.Args[2:])
 	case "audit":
 		code, err = runAudit(os.Args[2:])
 	case "version", "--version", "-v":
