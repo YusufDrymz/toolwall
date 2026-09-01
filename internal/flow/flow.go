@@ -130,9 +130,15 @@ func (e *Engine) Decide(scopeID, tool string, arguments json.RawMessage) Decisio
 	return Decision{Enforced: enforced}
 }
 
-// Record stains the scope with the labels of a tool whose result just came
-// back. Errored results count too: the text of a failure is still content the
-// model reads, and an attacker who controls a web page controls its errors.
+// Record stains the scope with a tool's labels. It is called when the call is
+// released to the server, not when the result comes back.
+//
+// That ordering is the whole defence. MCP lets a client keep several requests
+// in flight, so a wall that waits for results can be walked straight past:
+// issue the read and the send in the same breath and neither one has returned
+// when the other is judged. Staining on release also means a call that fails
+// still counts, which is the conservative reading -- an attacker who controls
+// a page controls its error text too.
 func (e *Engine) Record(scopeID, tool string) []string {
 	tp, ok := e.cfg.Lookup(e.server, tool)
 	if !ok || len(tp.Labels) == 0 {

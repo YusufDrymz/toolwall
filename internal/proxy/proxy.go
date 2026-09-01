@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/YusufDrymz/toolwall/internal/audit"
 	"github.com/YusufDrymz/toolwall/internal/flow"
@@ -30,6 +31,10 @@ import (
 // strongest boundary available locally; operators who can pass a correlation
 // id through _meta can narrow it with ScopeKey.
 const DefaultScope = "process"
+
+// shutdownGrace is how long a server gets to answer what is already in flight
+// after the client goes away.
+const shutdownGrace = 5 * time.Second
 
 type Options struct {
 	Server   string
@@ -101,15 +106,25 @@ func (p *Proxy) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	stop := context.AfterFunc(ctx, func() { _ = cmd.Process.Kill() })
 	defer stop()
 
-	errc := make(chan error, 2)
-	go func() { errc <- p.pumpFromClient(client, server) }()
-	go func() { errc <- p.pumpFromServer(server, client) }()
+	fromClient := make(chan error, 1)
+	fromServer := make(chan error, 1)
+	go func() { fromClient <- p.pumpFromClient(client, server) }()
+	go func() { fromServer <- p.pumpFromServer(server, client) }()
 
-	err = <-errc
-	if isClosed(err) {
-		return nil
+	select {
+	case err := <-fromClient:
+		// The client hung up. Close the server's stdin so it shuts down the
+		// way it expects to, and keep forwarding until it does: replies to
+		// calls already in flight still belong to the client.
+		_ = serverIn.Close()
+		select {
+		case <-fromServer:
+		case <-time.After(shutdownGrace):
+		}
+		return ignoreClose(err)
+	case err := <-fromServer:
+		return ignoreClose(err)
 	}
-	return err
 }
 
 func (p *Proxy) pumpFromClient(client, server *mcp.Conn) error {
@@ -176,20 +191,21 @@ func (p *Proxy) screenCall(msg *mcp.Message) (bool, *mcp.Message) {
 		ev.Kind = audit.KindDenied
 		ev.Decision = &d
 	}
-	p.opts.Log.Write(ev)
 
-	if !d.Deny {
-		p.remember(msg.ID, params.Name, scope)
-		return true, nil
+	if d.Deny && d.Enforced {
+		p.opts.Log.Write(ev)
+		fmt.Fprintf(p.opts.Notices, "toolwall: denied %s (%s)\n", params.Name, d.Rule)
+		return false, denial(msg.ID, params.Name, d)
 	}
-	if !d.Enforced {
+	if d.Deny {
 		fmt.Fprintf(p.opts.Notices, "toolwall: would deny %s (%s) -- observe mode\n", params.Name, d.Rule)
-		p.remember(msg.ID, params.Name, scope)
-		return true, nil
 	}
 
-	fmt.Fprintf(p.opts.Notices, "toolwall: denied %s (%s)\n", params.Name, d.Rule)
-	return false, denial(msg.ID, params.Name, d)
+	// Stain before the call leaves, not when its result returns: see flow.Record.
+	ev.Labels = audit.SortedLabels(p.eng.Record(scope, params.Name))
+	p.opts.Log.Write(ev)
+	p.remember(msg.ID, params.Name, scope)
+	return true, nil
 }
 
 func (p *Proxy) observeResponse(msg *mcp.Message) {
@@ -205,17 +221,15 @@ func (p *Proxy) observeResponse(msg *mcp.Message) {
 	switch {
 	case isCall:
 		if msg.Error != nil {
-			return // the call never ran, so nothing entered the scope
+			return
 		}
-		var res mcp.CallToolResult
-		_ = json.Unmarshal(msg.Result, &res)
 		if resultType(msg.Result) == "input_required" {
 			return // a round trip for more input, not tool output
 		}
-		labels := p.eng.Record(call.scope, call.tool)
+		var res mcp.CallToolResult
+		_ = json.Unmarshal(msg.Result, &res)
 		p.opts.Log.Write(audit.Event{
-			Kind: audit.KindResult, Scope: call.scope, Tool: call.tool,
-			Labels: audit.SortedLabels(labels), IsError: res.IsError,
+			Kind: audit.KindResult, Scope: call.scope, Tool: call.tool, IsError: res.IsError,
 		})
 	case isList:
 		p.screenToolList(msg)
@@ -326,11 +340,16 @@ func resultType(result json.RawMessage) string {
 	return envelope.ResultType
 }
 
-func isClosed(err error) bool {
+// ignoreClose swallows the errors that just mean "the other end went away".
+func ignoreClose(err error) error {
 	if err == nil {
-		return true
+		return nil
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "EOF") || strings.Contains(msg, "file already closed") ||
-		strings.Contains(msg, "broken pipe")
+	for _, quiet := range []string{"EOF", "file already closed", "broken pipe", "read/write on closed pipe"} {
+		if strings.Contains(msg, quiet) {
+			return nil
+		}
+	}
+	return err
 }
