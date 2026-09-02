@@ -64,6 +64,14 @@ rather than replacing them -- run your servers in ToolHive, put identity in fron
 Pomerium, and let `toolwall` decide whether this particular call may go out given what
 this particular session already read.
 
+## Where it fits: SAFE-MCP
+
+toolwall's controls map onto the [SAFE-MCP](https://github.com/SAFE-MCP/safe-mcp)
+technique catalog -- rug pull (SAF-T1201), covert-channel and parameter exfiltration
+(SAF-T1910, SAF-T1911), cross-tool contamination (SAF-T1701), path traversal
+(SAF-T1105) -- and is deliberately clear about what it leaves to a sandbox or an
+identity proxy. The full, honest mapping is in [docs/SAFE-MCP.md](docs/SAFE-MCP.md).
+
 ## Install
 
 ```sh

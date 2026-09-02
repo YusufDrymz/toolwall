@@ -65,6 +65,14 @@ Gateway kategorisi kalabalık ve büyük kısmı başka bir problemi çözüyor:
 ve bu çağrının bu oturumda okunanlar ışığında dışarı çıkıp çıkamayacağına `toolwall`
 karar versin.
 
+## Nereye oturuyor: SAFE-MCP
+
+toolwall'ın kontrolleri [SAFE-MCP](https://github.com/SAFE-MCP/safe-mcp) technique
+kataloğuna oturuyor: rug pull (SAF-T1201), covert-channel ve parametre exfiltration'ı
+(SAF-T1910, SAF-T1911), cross-tool contamination (SAF-T1701), path traversal
+(SAF-T1105) — ve neyi bilinçli olarak bir sandbox'a ya da kimlik proxy'sine bıraktığı
+konusunda nettir. Tam ve dürüst haritalama: [docs/SAFE-MCP.md](docs/SAFE-MCP.md).
+
 ## Kurulum
 
 ```sh
