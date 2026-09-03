@@ -52,8 +52,11 @@ type Config struct {
 	Mode    Mode                      `yaml:"mode,omitempty"`
 	Servers map[string]mcp.ServerSpec `yaml:"servers,omitempty"`
 	Tools   map[string]ToolPolicy     `yaml:"tools,omitempty"`
-	Flow    Flow                      `yaml:"flow,omitempty"`
-	Audit   Audit                     `yaml:"audit,omitempty"`
+	// Resources label data that enters the scope by URI rather than by tool
+	// name. Reading a file resource is an ingress just like a tool result.
+	Resources []ResourceRule `yaml:"resources,omitempty"`
+	Flow      Flow           `yaml:"flow,omitempty"`
+	Audit     Audit          `yaml:"audit,omitempty"`
 }
 
 type ToolPolicy struct {
@@ -64,6 +67,17 @@ type ToolPolicy struct {
 	Deny   bool               `yaml:"deny,omitempty"`
 	Args   map[string]ArgRule `yaml:"args,omitempty"`
 	Note   string             `yaml:"note,omitempty"`
+}
+
+// ResourceRule labels every resource whose URI matches. Rules are additive:
+// a URI takes the labels of every rule it matches, which is the conservative
+// reading when two rules overlap.
+type ResourceRule struct {
+	Match  string   `yaml:"match"`
+	Labels []string `yaml:"labels,omitempty"`
+	Note   string   `yaml:"note,omitempty"`
+
+	re *regexp.Regexp
 }
 
 // ArgRule constrains one argument. Paths are dotted: "options.path".
@@ -179,6 +193,18 @@ func (c *Config) normalize() error {
 		}
 	}
 
+	for i := range c.Resources {
+		r := &c.Resources[i]
+		if r.Match == "" {
+			return fmt.Errorf("policy: resources[%d] has no match pattern", i)
+		}
+		re, err := regexp.Compile(r.Match)
+		if err != nil {
+			return fmt.Errorf("policy: resources[%d] match: %w", i, err)
+		}
+		r.re = re
+	}
+
 	for name, spec := range c.Servers {
 		if err := spec.Validate(); err != nil {
 			return fmt.Errorf("policy: server %q: %w", name, err)
@@ -225,6 +251,13 @@ func (c *Config) checkLabels() error {
 			}
 		}
 	}
+	for _, r := range c.Resources {
+		for _, l := range r.Labels {
+			if !used[l] {
+				unknown = append(unknown, fmt.Sprintf("resource %s: %q", r.Match, l))
+			}
+		}
+	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
 		return fmt.Errorf("policy: label(s) not referenced by any rule (typo?): %s", strings.Join(unknown, ", "))
@@ -255,6 +288,24 @@ func (c *Config) Lookup(server, tool string) (ToolPolicy, bool) {
 	}
 	tp, ok := c.Tools[tool]
 	return tp, ok
+}
+
+// ResourceLabels returns the union of labels from every rule matching uri.
+func (c *Config) ResourceLabels(uri string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, r := range c.Resources {
+		if r.re == nil || !r.re.MatchString(uri) {
+			continue
+		}
+		for _, l := range r.Labels {
+			if !seen[l] {
+				seen[l] = true
+				out = append(out, l)
+			}
+		}
+	}
+	return out
 }
 
 func (t ToolPolicy) Has(label string) bool {

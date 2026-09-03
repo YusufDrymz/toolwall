@@ -83,3 +83,32 @@ tools:
 	require.True(t, ok)
 	assert.True(t, bare.Has(policy.LabelUntrusted))
 }
+
+func TestResourceLabelsUnionEveryMatchingRule(t *testing.T) {
+	cfg, err := policy.Parse([]byte(`
+version: 1
+resources:
+  - match: '^file:///hr/'
+    labels: [sensitive]
+  - match: '\.csv$'
+    labels: [untrusted]
+`))
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []string{"sensitive"}, cfg.ResourceLabels("file:///hr/notes.txt"))
+	assert.ElementsMatch(t, []string{"untrusted"}, cfg.ResourceLabels("file:///public/a.csv"))
+	assert.ElementsMatch(t, []string{"sensitive", "untrusted"},
+		cfg.ResourceLabels("file:///hr/salaries.csv"), "overlapping rules are additive")
+	assert.Empty(t, cfg.ResourceLabels("file:///other/x.txt"))
+}
+
+func TestResourceRuleValidation(t *testing.T) {
+	_, err := policy.Parse([]byte("version: 1\nresources:\n  - labels: [sensitive]\n"))
+	assert.ErrorContains(t, err, "no match pattern")
+
+	_, err = policy.Parse([]byte("version: 1\nresources:\n  - match: '[unclosed'\n"))
+	assert.ErrorContains(t, err, "match")
+
+	_, err = policy.Parse([]byte("version: 1\nresources:\n  - match: '^file:'\n    labels: [sensitiv]\n"))
+	assert.ErrorContains(t, err, "not referenced by any rule")
+}
