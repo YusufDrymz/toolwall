@@ -26,6 +26,7 @@ type Config struct {
 	SupportedVersions []string          `json:"supportedVersions,omitempty"`
 	Tools             []mcp.Tool        `json:"tools,omitempty"`
 	Prompts           []mcp.Prompt      `json:"prompts,omitempty"`
+	Resources         []mcp.Resource    `json:"resources,omitempty"`
 	Results           map[string]string `json:"results,omitempty"`
 	// StrictMeta makes a modern server reject requests without the required
 	// per-request metadata, the way the spec says it must.
@@ -139,6 +140,25 @@ func (cfg Config) handle(msg *mcp.Message) *mcp.Message {
 			return mcp.Errorf(msg.ID, mcp.CodeMethodNotFound, "no prompts here")
 		}
 		return cfg.reply(msg.ID, map[string]any{"prompts": cfg.Prompts})
+
+	case mcp.MethodResourcesLst:
+		if len(cfg.Resources) == 0 {
+			return mcp.Errorf(msg.ID, mcp.CodeMethodNotFound, "no resources here")
+		}
+		return cfg.reply(msg.ID, map[string]any{"resultType": "complete", "resources": cfg.Resources})
+
+	case mcp.MethodResourcesRead:
+		var params mcp.ReadResourceParams
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return mcp.Errorf(msg.ID, mcp.CodeInvalidParams, "bad params")
+		}
+		return cfg.reply(msg.ID, map[string]any{
+			"resultType": "complete",
+			"contents": []map[string]any{{
+				"uri": params.URI, "mimeType": "text/plain",
+				"text": "contents of " + params.URI,
+			}},
+		})
 
 	case mcp.MethodToolsCall:
 		var params mcp.CallToolParams

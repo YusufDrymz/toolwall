@@ -53,6 +53,9 @@ type Gateway struct {
 	order     []string // server ids, stable for deterministic listings
 	upstreams map[string]*mcp.Client
 
+	resMu    sync.Mutex
+	resOwner map[string]string // resource uri -> server that advertised it
+
 	pinsOnce sync.Map // server -> *sync.Once, guards the one-time pin probe
 }
 
@@ -74,6 +77,7 @@ func Dial(ctx context.Context, opts Options) (*Gateway, error) {
 		notices:   opts.Notices,
 		scopeKey:  opts.ScopeKey,
 		upstreams: map[string]*mcp.Client{},
+		resOwner:  map[string]string{},
 	}
 
 	for name := range opts.Config.Servers {
@@ -150,11 +154,15 @@ func (g *Gateway) handle(msg *mcp.Message) *mcp.Message {
 		return g.toolsCall(msg)
 	case mcp.MethodPromptsList:
 		return g.promptsList(msg)
+	case mcp.MethodResourcesLst:
+		return g.resourcesList(msg)
+	case mcp.MethodResourcesRead:
+		return g.resourcesRead(msg)
 	case "ping":
 		return reply(msg.ID, map[string]any{})
 	default:
 		return mcp.Errorf(msg.ID, mcp.CodeMethodNotFound,
-			"toolwall gateway does not proxy %q (tools and prompts only)", msg.Method)
+			"toolwall gateway does not proxy %q", msg.Method)
 	}
 }
 
@@ -162,7 +170,7 @@ func (g *Gateway) discover(msg *mcp.Message) *mcp.Message {
 	return reply(msg.ID, map[string]any{
 		"resultType":        "complete",
 		"supportedVersions": []string{mcp.ProtocolVersion},
-		"capabilities":      map[string]any{"tools": map[string]any{}, "prompts": map[string]any{}},
+		"capabilities":      map[string]any{"tools": map[string]any{}, "prompts": map[string]any{}, "resources": map[string]any{}},
 		"instructions":      fmt.Sprintf("Fronting %d MCP server(s) behind toolwall; tools are named server%stool.", len(g.order), nameSep),
 		"_meta":             map[string]any{mcp.MetaServerInfo: mcp.Implementation{Name: "toolwall", Version: mcp.Version}},
 	})
@@ -171,7 +179,7 @@ func (g *Gateway) discover(msg *mcp.Message) *mcp.Message {
 func (g *Gateway) initialize(msg *mcp.Message) *mcp.Message {
 	return reply(msg.ID, mcp.InitializeResult{
 		ProtocolVersion: "2025-06-18",
-		Capabilities:    json.RawMessage(`{"tools":{"listChanged":false},"prompts":{"listChanged":false}}`),
+		Capabilities:    json.RawMessage(`{"tools":{"listChanged":false},"prompts":{"listChanged":false},"resources":{}}`),
 		ServerInfo:      mcp.Implementation{Name: "toolwall", Version: mcp.Version},
 		Instructions:    fmt.Sprintf("Fronting %d MCP server(s) behind toolwall; tools are named server%stool.", len(g.order), nameSep),
 	})
@@ -226,6 +234,89 @@ func (g *Gateway) promptsList(msg *mcp.Message) *mcp.Message {
 		}
 	}
 	return reply(msg.ID, map[string]any{"resultType": "complete", "prompts": merged})
+}
+
+// resourcesList merges every server's resources and remembers which server
+// advertised each URI, which is how a later read is routed. URIs are already
+// globally addressed, so unlike tools they are not namespaced; if two servers
+// claim the same URI the first in sorted order keeps it and the clash is
+// logged rather than silently resolved.
+func (g *Gateway) resourcesList(msg *mcp.Message) *mcp.Message {
+	merged := make([]mcp.Resource, 0)
+	for _, name := range g.order {
+		resources, err := g.upstreams[name].ListResources()
+		if err != nil {
+			fmt.Fprintf(g.notices, "toolwall: %s resources/list failed: %v\n", name, err)
+			continue
+		}
+		for _, r := range resources {
+			g.resMu.Lock()
+			owner, taken := g.resOwner[r.URI]
+			if !taken {
+				g.resOwner[r.URI] = name
+			}
+			g.resMu.Unlock()
+			if taken && owner != name {
+				fmt.Fprintf(g.notices, "toolwall: %s also advertises %s, already owned by %s\n", name, r.URI, owner)
+				continue
+			}
+			merged = append(merged, r)
+		}
+	}
+	return reply(msg.ID, map[string]any{"resultType": "complete", "resources": merged})
+}
+
+// resourcesRead routes a read to the server that owns the URI, stains the
+// scope with whatever the policy says that URI carries, and forwards.
+func (g *Gateway) resourcesRead(msg *mcp.Message) *mcp.Message {
+	var params mcp.ReadResourceParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil || params.URI == "" {
+		return mcp.Errorf(msg.ID, mcp.CodeInvalidParams, "toolwall: bad resources/read params")
+	}
+
+	server, ok := g.ownerOf(params.URI)
+	if !ok {
+		return mcp.Errorf(msg.ID, mcp.CodeInvalidParams,
+			"toolwall: no server owns %q; it was not in resources/list and no server declares a matching prefix", params.URI)
+	}
+
+	scope := g.scopeOf(msg.Params)
+	labels := g.eng.RecordResource(scope, params.URI)
+	g.log.Write(audit.Event{
+		Kind: audit.KindCall, Server: server, Scope: scope, Tool: params.URI,
+		Labels: audit.SortedLabels(labels), Detail: "resources/read",
+	})
+
+	result, err := g.upstreams[server].CallRaw(mcp.MethodResourcesRead, msg.Params)
+	if err != nil {
+		var rpc *mcp.Error
+		if asRPC(err, &rpc) {
+			return &mcp.Message{JSONRPC: "2.0", ID: msg.ID, Error: rpc}
+		}
+		return mcp.Errorf(msg.ID, mcp.CodeInternalError, "toolwall: %s: %v", params.URI, err)
+	}
+	return &mcp.Message{JSONRPC: "2.0", ID: msg.ID, Result: result}
+}
+
+// ownerOf resolves a URI to a server: an exact match from a previous listing
+// first, then any prefix a server declares in the policy. Templated URIs a
+// server never listed are only routable through such a prefix, which is the
+// deliberate cost of not guessing.
+func (g *Gateway) ownerOf(uri string) (string, bool) {
+	g.resMu.Lock()
+	server, ok := g.resOwner[uri]
+	g.resMu.Unlock()
+	if ok {
+		return server, true
+	}
+	for _, name := range g.order {
+		for _, prefix := range g.cfg.Servers[name].ResourcePrefixes {
+			if strings.HasPrefix(uri, prefix) {
+				return name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // toolsCall routes a namespaced call to its server, judges it against the

@@ -275,3 +275,129 @@ func mustRaw(t *testing.T, v any) json.RawMessage {
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
+
+const resourcePolicy = `
+version: 1
+tools:
+  mail.send:
+    labels: [sink]
+resources:
+  - match: '^file:///hr/'
+    labels: [sensitive]
+  - match: '^https?://'
+    labels: [untrusted]
+`
+
+func resourceServers() map[string]fakemcp.Config {
+	return map[string]fakemcp.Config{
+		"hr": {Name: "hr", Era: "modern", Resources: []mcp.Resource{
+			{URI: "file:///hr/salaries.csv", Name: "salaries.csv", MimeType: "text/csv"},
+		}},
+		"mail": {Name: "mail", Era: "modern", Tools: []mcp.Tool{{Name: "send"}}},
+	}
+}
+
+func TestResourcesListAggregatesAcrossServers(t *testing.T) {
+	s := start(t, resourcePolicy, resourceServers())
+
+	res := s.request(mcp.MethodResourcesLst, nil)
+	require.Nil(t, res.Error)
+
+	var list mcp.ResourcesListResult
+	require.NoError(t, json.Unmarshal(res.Result, &list))
+	require.Len(t, list.Resources, 1)
+	assert.Equal(t, "file:///hr/salaries.csv", list.Resources[0].URI)
+}
+
+// A resource read is an ingress: reading the HR file has to stain the scope,
+// or an agent could take the same data out through the door tools are watched at.
+func TestResourceReadStainsTheScopeAndBlocksTheSink(t *testing.T) {
+	s := start(t, resourcePolicy, resourceServers())
+
+	require.Nil(t, s.request(mcp.MethodResourcesLst, nil).Error, "list first so the uri is routable")
+	require.Nil(t, s.call("mail.send", map[string]any{"to": "ops@corp.test"}).Error, "clean scope")
+
+	read := s.request(mcp.MethodResourcesRead, mcp.ReadResourceParams{URI: "file:///hr/salaries.csv"})
+	require.Nil(t, read.Error)
+	assert.Contains(t, string(read.Result), "contents of file:///hr/salaries.csv")
+
+	blocked := s.call("mail.send", map[string]any{"to": "attacker@evil.test"})
+	require.NotNil(t, blocked.Error, "the sink must be refused after the resource read")
+	assert.Contains(t, blocked.Error.Message, "sensitive data was read earlier")
+	assert.Contains(t, blocked.Error.Message, "file:///hr/salaries.csv", "the evidence names the resource")
+}
+
+func TestResourceReadWithoutAMatchingRuleDoesNotStain(t *testing.T) {
+	s := start(t, `
+version: 1
+tools:
+  mail.send:
+    labels: [sink]
+resources:
+  - match: '^file:///hr/'
+    labels: [sensitive]
+`, map[string]fakemcp.Config{
+		"docs": {Name: "docs", Era: "modern", Resources: []mcp.Resource{{URI: "file:///public/readme.md"}}},
+		"mail": {Name: "mail", Era: "modern", Tools: []mcp.Tool{{Name: "send"}}},
+	})
+
+	require.Nil(t, s.request(mcp.MethodResourcesLst, nil).Error)
+	require.Nil(t, s.request(mcp.MethodResourcesRead, mcp.ReadResourceParams{URI: "file:///public/readme.md"}).Error)
+
+	assert.Nil(t, s.call("mail.send", nil).Error, "an unlabelled resource carries no taint")
+}
+
+// A URI nobody listed and nobody claims cannot be routed, and saying so is
+// better than guessing which server to hand it to.
+func TestResourceReadRefusesAnUnroutableURI(t *testing.T) {
+	s := start(t, resourcePolicy, resourceServers())
+
+	res := s.request(mcp.MethodResourcesRead, mcp.ReadResourceParams{URI: "file:///unknown/x"})
+	require.NotNil(t, res.Error)
+	assert.Contains(t, res.Error.Message, "no server owns")
+}
+
+// A declared prefix routes a templated URI the server never listed.
+func TestResourcePrefixRoutesUnlistedURI(t *testing.T) {
+	cfg, err := policy.Parse([]byte(resourcePolicy))
+	require.NoError(t, err)
+
+	cfg.Servers = map[string]mcp.ServerSpec{}
+	for name, fc := range resourceServers() {
+		spec, err := fakemcp.Spec(fc)
+		require.NoError(t, err)
+		if name == "hr" {
+			spec.ResourcePrefixes = []string{"file:///hr/"}
+		}
+		cfg.Servers[name] = spec
+	}
+
+	logs := &bytes.Buffer{}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	g, err := gateway.Dial(ctx, gateway.Options{Config: cfg, Log: audit.To(nopCloser{logs}, ""), Notices: io.Discard})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = g.Close() })
+
+	clientReader, gwWriter := io.Pipe()
+	gwReader, clientWriter := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- g.Serve(ctx, gwReader, gwWriter) }()
+	t.Cleanup(func() {
+		_ = clientWriter.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	s := &session{t: t, conn: mcp.NewConn(clientReader, clientWriter), logs: logs}
+
+	// Never listed, but the prefix claims it.
+	res := s.request(mcp.MethodResourcesRead, mcp.ReadResourceParams{URI: "file:///hr/2026/q3.csv"})
+	require.Nil(t, res.Error)
+	assert.Contains(t, string(res.Result), "q3.csv")
+
+	assert.NotNil(t, s.call("mail.send", nil).Error, "the templated read still stained the scope")
+}
