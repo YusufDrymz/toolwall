@@ -53,13 +53,14 @@ const (
 
 // MCP methods toolwall reacts to. Anything not listed here is forwarded as-is.
 const (
-	MethodDiscover     = "server/discover"
-	MethodInitialize   = "initialize"
-	MethodToolsList    = "tools/list"
-	MethodToolsCall    = "tools/call"
-	MethodPromptsList  = "prompts/list"
-	MethodPromptsGet   = "prompts/get"
-	MethodResourcesLst = "resources/list"
+	MethodDiscover      = "server/discover"
+	MethodInitialize    = "initialize"
+	MethodToolsList     = "tools/list"
+	MethodToolsCall     = "tools/call"
+	MethodPromptsList   = "prompts/list"
+	MethodPromptsGet    = "prompts/get"
+	MethodResourcesLst  = "resources/list"
+	MethodResourcesRead = "resources/read"
 )
 
 func (m *Message) IsRequest() bool      { return m.Method != "" && len(m.ID) > 0 }

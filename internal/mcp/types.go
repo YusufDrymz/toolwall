@@ -36,6 +36,27 @@ type PromptsListResult struct {
 	NextCursor string   `json:"nextCursor,omitempty"`
 }
 
+// Resource is a resource definition as advertised by a server. Reading one is
+// a data ingress just like a tool result, which is why the flow engine has to
+// see it: a file resource can carry exactly the private data a rule is about.
+type Resource struct {
+	URI         string          `json:"uri"`
+	Name        string          `json:"name,omitempty"`
+	Title       string          `json:"title,omitempty"`
+	Description string          `json:"description,omitempty"`
+	MimeType    string          `json:"mimeType,omitempty"`
+	Annotations json.RawMessage `json:"annotations,omitempty"`
+}
+
+type ResourcesListResult struct {
+	Resources  []Resource `json:"resources"`
+	NextCursor string     `json:"nextCursor,omitempty"`
+}
+
+type ReadResourceParams struct {
+	URI string `json:"uri"`
+}
+
 type CallToolParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`

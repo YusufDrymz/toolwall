@@ -47,6 +47,10 @@ type ServerSpec struct {
 	// Headers are sent on every request; values may reference the environment
 	// as ${NAME} so a committed policy never has to hold a credential.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// ResourcePrefixes declares URI prefixes this server owns, so the gateway
+	// can route a resources/read for a templated URI the server never listed.
+	// Without one, only URIs seen in resources/list are routable.
+	ResourcePrefixes []string `yaml:"resource_prefixes,omitempty" json:"resource_prefixes,omitempty"`
 	// Insecure permits plain http:// to a host other than loopback. Off by
 	// default: a bearer token on the wire in clear is the kind of mistake a
 	// security tool should refuse to make quietly.
@@ -276,6 +280,28 @@ func (c *Client) ListTools() ([]Tool, error) {
 	c.schemas = schemas
 	c.mu.Unlock()
 	return kept, nil
+}
+
+// ListResources returns the server's resources. Like prompts, a server that
+// does not implement them answers method-not-found, which is not an error.
+func (c *Client) ListResources() ([]Resource, error) {
+	var all []Resource
+	cursor := ""
+	for {
+		var res ResourcesListResult
+		err := c.call(defaultCallTimeout, MethodResourcesLst, ListParams{Cursor: cursor}, &res)
+		if isMethodNotFound(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, c.annotate(err)
+		}
+		all = append(all, res.Resources...)
+		if res.NextCursor == "" || res.NextCursor == cursor {
+			return all, nil
+		}
+		cursor = res.NextCursor
+	}
 }
 
 // ListPrompts returns the server's prompts. Prompt text lands in the model's
