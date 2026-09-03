@@ -246,6 +246,31 @@ gateways cannot see, because it happens between two servers they each guard in i
 Populate the policy one server at a time with `init --server`, and `verify` checks all
 of them.
 
+### Resources are an ingress too
+
+A tool result is not the only way data enters a session. Reading a file or a database
+resource does the same thing, so `serve` aggregates `resources/list`, routes
+`resources/read` to the server that advertised the URI, and stains the scope according
+to URI rules:
+
+```yaml
+resources:
+    - match: '^file:///hr/'
+      labels: [sensitive]
+    - match: '^https?://'
+      labels: [untrusted]
+
+servers:
+    hr:
+        command: hr-mcp
+        # lets a templated URI the server never listed still be routed
+        resource_prefixes: ['file:///hr/']
+```
+
+Rules are additive: a URI takes the labels of every rule it matches. After reading
+`file:///hr/salaries.csv`, a `sink` call is refused exactly as it would be after a
+sensitive tool result, and the denial names the resource as the evidence.
+
 ## The rules
 
 The default policy is two rules, and they are the reason the tool exists:
@@ -308,8 +333,9 @@ Being clear about this matters more than the feature list.
   the feature. The 2026-07-28 revision is explicit that a connection is not a session
   and gives a proxy no conversation identifier, so if your client sets a correlation id
   in `_meta`, point `--scope-key` at it to track flows per conversation instead.
-- **`serve` proxies tools and prompts.** Resources are not aggregated yet; a client
-  that needs them should reach that server directly.
+- **`serve` does not proxy resource templates.** Resources are aggregated and read,
+  but a templated URI a server never listed is only routable if that server declares
+  a `resource_prefixes` entry.
 - **`run` is stdio only.** It is a byte proxy over a spawned child. Remote Streamable
   HTTP servers go through `serve`, which talks to them as a real MCP client.
 - **The model can still talk.** `toolwall` guards tool calls. It does not read the

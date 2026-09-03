@@ -247,6 +247,31 @@ olarak budur, çünkü her birinin ayrı ayrı koruduğu iki sunucunun arasında
 
 Policy'yi sunucu sunucu `init --server` ile doldur; `verify` hepsini birden kontrol eder.
 
+### Kaynaklar da bir giriş kanalı
+
+Veriyi oturuma sokan tek yol tool sonucu değil. Bir dosyayı ya da veritabanı kaynağını
+okumak da aynı şeyi yapıyor. Bu yüzden `serve` `resources/list`'i topluyor,
+`resources/read`'i URI'yi duyuran sunucuya yönlendiriyor ve URI kurallarına göre
+scope'u lekeliyor:
+
+```yaml
+resources:
+    - match: '^file:///hr/'
+      labels: [sensitive]
+    - match: '^https?://'
+      labels: [untrusted]
+
+servers:
+    hr:
+        command: hr-mcp
+        # sunucunun hiç listelemediği templated URI'nin de yönlendirilmesini sağlar
+        resource_prefixes: ['file:///hr/']
+```
+
+Kurallar toplamalı: bir URI, eşleştiği her kuralın etiketlerini alır.
+`file:///hr/salaries.csv` okunduktan sonra bir `sink` çağrısı, hassas bir tool sonucundan
+sonra nasıl reddediliyorsa aynen reddediliyor ve ret, kanıt olarak kaynağı gösteriyor.
+
 ## Kurallar
 
 Varsayılan policy iki kuraldan ibaret ve aracın var olma sebebi de bu iki kural:
@@ -310,8 +335,9 @@ Bu bölüm özellik listesinden daha önemli.
   2026-07-28 revizyonu bir bağlantının oturum olmadığını açıkça söylüyor ve bir proxy'ye
   konuşma kimliği vermiyor; client'ın `_meta` içinde bir korelasyon id'si set ediyorsa
   `--scope-key` ile onu göster, akış konuşma başına izlensin.
-- **`serve` tool ve prompt'ları proxy'ler.** Resource'lar henüz toplanmıyor; onlara
-  ihtiyacı olan bir client o sunucuya doğrudan bağlanmalı.
+- **`serve` resource template'lerini proxy'lemiyor.** Resource'lar toplanıyor ve
+  okunuyor, ama bir sunucunun hiç listelemediği templated URI ancak o sunucu
+  `resource_prefixes` tanımlarsa yönlendirilebiliyor.
 - **`run` sadece stdio.** O, spawn edilen bir child üzerinden byte proxy'si. Uzak
   Streamable HTTP sunucuları `serve` üzerinden gider; `serve` onlarla gerçek bir MCP
   client gibi konuşur.
