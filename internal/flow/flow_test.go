@@ -194,3 +194,41 @@ func TestFingerprintIgnoresKeyOrder(t *testing.T) {
 
 	assert.Equal(t, policy.Fingerprint(a), policy.Fingerprint(b))
 }
+
+// A resource read is an ingress like any other: it has to be able to stain.
+func TestResourceReadStainsTheScope(t *testing.T) {
+	e := flow.New(load(t, `
+version: 1
+tools:
+  send_email:
+    labels: [sink]
+resources:
+  - match: '^file:///hr/'
+    labels: [sensitive]
+`))
+
+	assert.False(t, e.Decide(scopeID, "", "send_email", nil).Deny, "clean scope")
+
+	added := e.RecordResource(scopeID, "file:///hr/salaries.csv")
+	assert.Contains(t, added, "sensitive")
+
+	d := e.Decide(scopeID, "", "send_email", nil)
+	require.True(t, d.Deny)
+	require.Len(t, d.Because, 1)
+	assert.Equal(t, "file:///hr/salaries.csv", d.Because[0].Tool, "evidence names the resource")
+}
+
+func TestUnlabelledResourceDoesNotStain(t *testing.T) {
+	e := flow.New(load(t, `
+version: 1
+tools:
+  send_email:
+    labels: [sink]
+resources:
+  - match: '^file:///hr/'
+    labels: [sensitive]
+`))
+
+	e.RecordResource(scopeID, "file:///public/readme.md")
+	assert.False(t, e.Decide(scopeID, "", "send_email", nil).Deny)
+}

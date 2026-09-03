@@ -219,6 +219,36 @@ func (e *Engine) Record(scopeID, server, tool string) []string {
 	return added
 }
 
+// RecordResource stains the scope for a resource read. A resource is addressed
+// by URI rather than by name, so its labels come from the policy's URI rules,
+// but otherwise this is the same ingress as a tool result: reading a file that
+// holds private data has to count, or the wall has a second door.
+func (e *Engine) RecordResource(scopeID, uri string) []string {
+	labels := e.cfg.ResourceLabels(uri)
+	if len(labels) == 0 {
+		e.bump(scopeID)
+		return nil
+	}
+
+	st := e.scope(scopeID)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	st.calls++
+	var added []string
+	for _, l := range labels {
+		if l == policy.LabelSink {
+			continue // a resource read is an ingress, never an exit
+		}
+		if _, seen := st.seen[l]; seen {
+			continue
+		}
+		st.seen[l] = Evidence{Label: l, Tool: uri, Call: st.calls}
+		added = append(added, l)
+	}
+	return added
+}
+
 // Labels reports what the scope currently carries, for status output.
 func (e *Engine) Labels(scopeID string) []Evidence {
 	st := e.scope(scopeID)
