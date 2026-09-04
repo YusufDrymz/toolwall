@@ -28,6 +28,10 @@ type Config struct {
 	Prompts           []mcp.Prompt      `json:"prompts,omitempty"`
 	Resources         []mcp.Resource    `json:"resources,omitempty"`
 	Results           map[string]string `json:"results,omitempty"`
+	// NeedsInput names tools that answer the first call with an
+	// InputRequiredResult and only complete once the retry carries the
+	// matching inputResponses and requestState back.
+	NeedsInput []string `json:"needsInput,omitempty"`
 	// StrictMeta makes a modern server reject requests without the required
 	// per-request metadata, the way the spec says it must.
 	StrictMeta bool `json:"strictMeta,omitempty"`
@@ -160,11 +164,50 @@ func (cfg Config) handle(msg *mcp.Message) *mcp.Message {
 			}},
 		})
 
+	case mcp.MethodPromptsGet:
+		var params struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return mcp.Errorf(msg.ID, mcp.CodeInvalidParams, "bad params")
+		}
+		for _, p := range cfg.Prompts {
+			if p.Name == params.Name {
+				return cfg.reply(msg.ID, map[string]any{
+					"resultType": "complete",
+					"messages": []map[string]any{{
+						"role":    "user",
+						"content": mcp.TextContent{Type: "text", Text: "prompt " + p.Name + " from " + cfg.Name},
+					}},
+				})
+			}
+		}
+		return mcp.Errorf(msg.ID, mcp.CodeInvalidParams, "unknown prompt %q", params.Name)
+
 	case mcp.MethodToolsCall:
 		var params mcp.CallToolParams
 		if err := json.Unmarshal(msg.Params, &params); err != nil {
 			return mcp.Errorf(msg.ID, mcp.CodeInvalidParams, "bad params")
 		}
+		if contains(cfg.NeedsInput, params.Name) {
+			var retry struct {
+				InputResponses map[string]json.RawMessage `json:"inputResponses"`
+				RequestState   string                     `json:"requestState"`
+			}
+			_ = json.Unmarshal(msg.Params, &retry)
+			if len(retry.InputResponses) == 0 || retry.RequestState != "state-1" {
+				return cfg.reply(msg.ID, map[string]any{
+					"resultType":    "input_required",
+					"inputRequests": map[string]any{"who": map[string]any{"method": "elicitation/create"}},
+					"requestState":  "state-1",
+				})
+			}
+			return cfg.reply(msg.ID, map[string]any{
+				"resultType": "complete",
+				"content":    []mcp.TextContent{{Type: "text", Text: "completed with input"}},
+			})
+		}
+
 		text, ok := cfg.Results[params.Name]
 		if !ok {
 			text = "ok"

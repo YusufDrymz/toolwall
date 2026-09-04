@@ -154,6 +154,8 @@ func (g *Gateway) handle(msg *mcp.Message) *mcp.Message {
 		return g.toolsCall(msg)
 	case mcp.MethodPromptsList:
 		return g.promptsList(msg)
+	case mcp.MethodPromptsGet:
+		return g.promptsGet(msg)
 	case mcp.MethodResourcesLst:
 		return g.resourcesList(msg)
 	case mcp.MethodResourcesRead:
@@ -234,6 +236,52 @@ func (g *Gateway) promptsList(msg *mcp.Message) *mcp.Message {
 		}
 	}
 	return reply(msg.ID, map[string]any{"resultType": "complete", "prompts": merged})
+}
+
+// promptsGet routes a namespaced prompt to its server. The gateway advertises
+// prompts and namespaces them in the listing, so it has to serve a get for one.
+func (g *Gateway) promptsGet(msg *mcp.Message) *mcp.Message {
+	var params struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return mcp.Errorf(msg.ID, mcp.CodeInvalidParams, "toolwall: bad prompts/get params")
+	}
+	server, prompt, ok := g.route(params.Name)
+	if !ok {
+		return mcp.Errorf(msg.ID, mcp.CodeInvalidParams,
+			"toolwall: %q is not a known server.prompt", params.Name)
+	}
+	forward, err := renameInParams(msg.Params, prompt)
+	if err != nil {
+		return mcp.Errorf(msg.ID, mcp.CodeInternalError, "toolwall: %v", err)
+	}
+	result, callErr := g.upstreams[server].CallRaw(mcp.MethodPromptsGet, forward)
+	if callErr != nil {
+		var rpc *mcp.Error
+		if asRPC(callErr, &rpc) {
+			return &mcp.Message{JSONRPC: "2.0", ID: msg.ID, Error: rpc}
+		}
+		return mcp.Errorf(msg.ID, mcp.CodeInternalError, "toolwall: %s: %v", params.Name, callErr)
+	}
+	return &mcp.Message{JSONRPC: "2.0", ID: msg.ID, Result: result}
+}
+
+// renameInParams replaces params.name and leaves every other field alone, so
+// whatever the client sent travels on untouched.
+func renameInParams(params json.RawMessage, name string) (json.RawMessage, error) {
+	fields := map[string]json.RawMessage{}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &fields); err != nil {
+			return nil, fmt.Errorf("params must be an object: %w", err)
+		}
+	}
+	raw, err := json.Marshal(name)
+	if err != nil {
+		return nil, err
+	}
+	fields["name"] = raw
+	return json.Marshal(fields)
 }
 
 // resourcesList merges every server's resources and remembers which server
@@ -363,8 +411,11 @@ func (g *Gateway) toolsCall(msg *mcp.Message) *mcp.Message {
 	ev.Labels = audit.SortedLabels(g.eng.Record(scope, server, tool))
 	g.log.Write(ev)
 
-	// Forward with the tool's real, un-namespaced name.
-	forward, err := json.Marshal(mcp.CallToolParams{Name: tool, Arguments: params.Arguments})
+	// Forward the client's own params with only the name un-namespaced.
+	// Rebuilding them from name and arguments alone would drop the fields a
+	// multi-round-trip retry carries (inputResponses, requestState), which
+	// silently breaks elicitation behind the gateway.
+	forward, err := renameInParams(msg.Params, tool)
 	if err != nil {
 		return mcp.Errorf(msg.ID, mcp.CodeInternalError, "toolwall: %v", err)
 	}

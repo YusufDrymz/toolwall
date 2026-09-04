@@ -401,3 +401,46 @@ func TestResourcePrefixRoutesUnlistedURI(t *testing.T) {
 
 	assert.NotNil(t, s.call("mail.send", nil).Error, "the templated read still stained the scope")
 }
+
+// A tools/call retry carries inputResponses and requestState back to the
+// server (MRTR). The gateway must forward those, not just name and arguments,
+// or elicitation dies behind it.
+func TestMultiRoundTripCallSurvivesTheGateway(t *testing.T) {
+	s := start(t, "version: 1\n", map[string]fakemcp.Config{
+		"srv": {Name: "srv", Era: "modern", Tools: []mcp.Tool{{Name: "ask"}}, NeedsInput: []string{"ask"}},
+	})
+
+	first := s.request(mcp.MethodToolsCall, map[string]any{"name": "srv.ask", "arguments": map[string]any{}})
+	require.Nil(t, first.Error)
+	assert.Contains(t, string(first.Result), "input_required", "server asks for input")
+
+	retry := s.request(mcp.MethodToolsCall, map[string]any{
+		"name":           "srv.ask",
+		"arguments":      map[string]any{},
+		"inputResponses": map[string]any{"who": map[string]any{"action": "accept"}},
+		"requestState":   "state-1",
+	})
+	require.Nil(t, retry.Error)
+	assert.Contains(t, string(retry.Result), "completed with input",
+		"the retry's inputResponses and requestState must reach the server")
+}
+
+// The gateway advertises prompts and namespaces them in the listing, so it has
+// to be able to serve a get for one.
+func TestPromptsGetRoutesToItsServer(t *testing.T) {
+	s := start(t, "version: 1\n", map[string]fakemcp.Config{
+		"docs": {Name: "docs", Era: "modern", Prompts: []mcp.Prompt{{Name: "summarize"}}},
+		"mail": {Name: "mail", Era: "modern", Tools: []mcp.Tool{{Name: "send"}}},
+	})
+
+	list := s.request(mcp.MethodPromptsList, nil)
+	require.Nil(t, list.Error)
+	var pl mcp.PromptsListResult
+	require.NoError(t, json.Unmarshal(list.Result, &pl))
+	require.Len(t, pl.Prompts, 1)
+	require.Equal(t, "docs.summarize", pl.Prompts[0].Name)
+
+	got := s.request(mcp.MethodPromptsGet, map[string]any{"name": "docs.summarize"})
+	require.Nil(t, got.Error, "a prompt the gateway advertised must be gettable")
+	assert.Contains(t, string(got.Result), "prompt summarize from docs")
+}
