@@ -269,6 +269,14 @@ func (e *Engine) bump(scopeID string) {
 	e.mu.Unlock()
 }
 
+// scope returns the state for an id, creating it on first sight.
+//
+// Nothing is ever evicted, and that is deliberate rather than an oversight.
+// Forgetting a scope means forgetting that it read something sensitive, so an
+// LRU or a TTL here would hand an attacker a way to clear the taint by waiting
+// or by making noise. The cost is that a long-running gateway keyed by
+// --scope-key holds a small record per distinct conversation for its lifetime,
+// which is the trade a security control should make in this direction.
 func (e *Engine) scope(id string) *scope {
 	e.mu.Lock()
 	defer e.mu.Unlock()

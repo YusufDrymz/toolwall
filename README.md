@@ -333,6 +333,14 @@ Being clear about this matters more than the feature list.
   the feature. The 2026-07-28 revision is explicit that a connection is not a session
   and gives a proxy no conversation identifier, so if your client sets a correlation id
   in `_meta`, point `--scope-key` at it to track flows per conversation instead.
+- **Resource definitions are not pinned.** Tools are fingerprinted and a changed
+  definition is refused; resources are not, so a poisoned resource *description* is
+  not caught the way a poisoned tool description is.
+- **Flow state is never evicted.** Forgetting a scope would mean forgetting that it
+  read something sensitive, so there is no TTL or LRU: a long-running gateway keyed by
+  `--scope-key` keeps a small record per conversation for its lifetime.
+- **A failing upstream yields a partial listing.** If one server's `tools/list` fails,
+  `serve` reports it on stderr and serves the rest rather than failing the whole list.
 - **`serve` does not proxy resource templates.** Resources are aggregated and read,
   but a templated URI a server never listed is only routable if that server declares
   a `resource_prefixes` entry.

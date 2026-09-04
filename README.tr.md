@@ -335,6 +335,15 @@ Bu bölüm özellik listesinden daha önemli.
   2026-07-28 revizyonu bir bağlantının oturum olmadığını açıkça söylüyor ve bir proxy'ye
   konuşma kimliği vermiyor; client'ın `_meta` içinde bir korelasyon id'si set ediyorsa
   `--scope-key` ile onu göster, akış konuşma başına izlensin.
+- **Resource tanımları pinlenmiyor.** Tool'ların parmak izi alınıyor ve değişen tanım
+  reddediliyor; resource'larda bu yok, yani zehirlenmiş bir resource *açıklaması*
+  zehirlenmiş tool açıklaması gibi yakalanmıyor.
+- **Akış durumu hiç silinmiyor.** Bir scope'u unutmak, onun hassas bir şey okuduğunu
+  unutmak demek olurdu; bu yüzden TTL ya da LRU yok. Bedeli: `--scope-key` ile uzun
+  süre çalışan bir gateway, konuşma başına küçük bir kaydı ömrü boyunca tutuyor.
+- **Çöken bir upstream kısmi listeye yol açar.** Bir sunucunun `tools/list`'i
+  başarısız olursa `serve` bunu stderr'e yazıp geri kalanını sunuyor, tüm listeyi
+  düşürmüyor.
 - **`serve` resource template'lerini proxy'lemiyor.** Resource'lar toplanıyor ve
   okunuyor, ama bir sunucunun hiç listelemediği templated URI ancak o sunucu
   `resource_prefixes` tanımlarsa yönlendirilebiliyor.
